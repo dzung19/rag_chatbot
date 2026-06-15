@@ -1,0 +1,293 @@
+# =============================================================================
+# RAG Chatbot — Docker Compose Orchestration
+# Launch: docker-compose up --build
+# =============================================================================
+
+services:
+
+  # -------------------------------------------------------------------------
+  # LLM Inference — Ollama (Gemma 4 E4B, CPU-only)
+  # -------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rag-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+    # CPU-only: no GPU runtime needed
+    deploy:
+      resources:
+        limits:
+          memory: 16G
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - rag-network
+
+  # Pull models on first start
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: rag-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+        echo 'Pulling Gemma 4 E4B model...' &&
+        ollama pull gemma4:e4b &&
+        echo 'Pulling nomic-embed-text model...' &&
+        ollama pull nomic-embed-text &&
+        echo 'Models ready!'
+      "
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    restart: "no"
+    networks:
+      - rag-network
+
+  # -------------------------------------------------------------------------
+  # Vector Database — ChromaDB
+  # -------------------------------------------------------------------------
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: rag-chromadb
+    volumes:
+      - chroma_data:/chroma/chroma
+    ports:
+      - "8003:8000"
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/heartbeat || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - rag-network
+
+  # -------------------------------------------------------------------------
+  # Document Ingestion Service
+  # -------------------------------------------------------------------------
+  ingestion:
+    build:
+      context: .
+      dockerfile: services/ingestion/Dockerfile
+    container_name: rag-ingestion
+    ports:
+      - "8001:8001"
+    volumes:
+      - uploaded_docs:/app/uploaded_docs
+    env_file: .env
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - CHROMA_HOST=http://chromadb:8000
+    depends_on:
+      chromadb:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/ingest/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - rag-network
+
+  # -------------------------------------------------------------------------
+  # RAG Query Engine Service
+  # -------------------------------------------------------------------------
+  rag-engine:
+    build:
+      context: .
+      dockerfile: services/rag_engine/Dockerfile
+    container_name: rag-engine
+    ports:
+      - "8002:8002"
+    env_file: .env
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - CHROMA_HOST=http://chromadb:8000
+    depends_on:
+      chromadb:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/rag/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - rag-network
+
+  # -------------------------------------------------------------------------
+  # API Gateway
+  # -------------------------------------------------------------------------
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    container_name: rag-gateway
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - INGESTION_SERVICE_URL=http://ingestion:8001
+      - RAG_ENGINE_SERVICE_URL=http://rag-engine:8002
+      - ONEDRIVE_CONNECTOR_URL=http://onedrive-connector:8004
+      - LOKI_URL=http://loki:3100
+    depends_on:
+      ingestion:
+        condition: service_healthy
+      rag-engine:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - rag-network
+
+  # -------------------------------------------------------------------------
+  # OneDrive/SharePoint Connector Service (Phase 2)
+  # -------------------------------------------------------------------------
+  onedrive-connector:
+    build:
+      context: .
+      dockerfile: services/onedrive_connector/Dockerfile
+    container_name: rag-onedrive-connector
+    ports:
+      - "8004:8004"
+    env_file: .env
+    environment:
+      - INGESTION_SERVICE_URL=http://ingestion:8001
+    depends_on:
+      ingestion:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8004/onedrive/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - rag-network
+
+  # -------------------------------------------------------------------------
+  # Web UI — Nginx + Static Files
+  # -------------------------------------------------------------------------
+  web-ui:
+    build:
+      context: .
+      dockerfile: services/web_ui/Dockerfile
+    container_name: rag-web-ui
+    ports:
+      - "3000:3000"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # -------------------------------------------------------------------------
+  # Logging — Loki (Log Aggregation)
+  # -------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: rag-loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./logging/loki-config.yml:/etc/loki/config.yml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/config.yml
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3100/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - rag-network
+
+  # -------------------------------------------------------------------------
+  # Logging — Promtail (Log Shipper)
+  # -------------------------------------------------------------------------
+  promtail:
+    image: grafana/promtail:3.0.0
+    container_name: rag-promtail
+    volumes:
+      - ./logging/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      loki:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # -------------------------------------------------------------------------
+  # Logging — Grafana (Dashboards & Analysis)
+  # -------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: rag-grafana
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./logging/grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+    depends_on:
+      loki:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  ollama_data:
+    driver: local
+  chroma_data:
+    driver: local
+  uploaded_docs:
+    driver: local
+  loki_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  rag-network:
+    driver: bridge
