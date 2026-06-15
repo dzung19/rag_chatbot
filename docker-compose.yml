@@ -86,6 +86,7 @@ services:
       - "8001:8001"
     volumes:
       - uploaded_docs:/app/uploaded_docs
+      - shared_data:/app/shared_data
     env_file: .env
     environment:
       - OLLAMA_HOST=http://ollama:11434
@@ -115,6 +116,8 @@ services:
     container_name: rag-engine
     ports:
       - "8002:8002"
+    volumes:
+      - shared_data:/app/shared_data
     env_file: .env
     environment:
       - OLLAMA_HOST=http://ollama:11434
@@ -283,6 +286,8 @@ volumes:
   loki_data:
     driver: local
   grafana_data:
+    driver: local
+  shared_data:
     driver: local
 
 # ---------------------------------------------------------------------------

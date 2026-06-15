@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     chunk_size: int = Field(default=1000, ge=100, le=5000)
     chunk_overlap: int = Field(default=200, ge=0, le=1000)
     max_upload_size_mb: int = Field(default=50, ge=1, le=200)
+    sqlite_db_path: str = Field(default="/app/shared_data/rag_hybrid.db")
 
     # --- Downstream Service URLs ---
     ingestion_service_url: str = Field(default="http://ingestion:8001")

@@ -40,6 +40,7 @@ from shared.models import (
     ServiceHealth,
 )
 from shared.security import SecurityHeadersMiddleware
+from shared.sqlite_db import get_sqlite_connection
 
 from document_parser import parse_document
 from chunker import chunk_text
@@ -231,6 +232,31 @@ async def _process_document(
             documents=chunk_texts,
             metadatas=metadatas,
         )
+
+        # 4.5. Store in SQLite FTS5 for Hybrid Search
+        try:
+            sqlite_conn = get_sqlite_connection()
+            # Delete old chunks if re-ingesting
+            sqlite_conn.execute("DELETE FROM document_chunks WHERE document_id = ?", (document_id,))
+            
+            sqlite_data = [
+                (
+                    f"{document_id}_chunk_{c['chunk_index']}", 
+                    document_id, 
+                    original_filename, 
+                    c["text"]
+                )
+                for c in chunks
+            ]
+            sqlite_conn.executemany(
+                "INSERT INTO document_chunks (id, document_id, filename, text) VALUES (?, ?, ?, ?)",
+                sqlite_data
+            )
+            sqlite_conn.commit()
+            sqlite_conn.close()
+        except Exception as sqlite_err:
+            logger.error("Failed to insert into SQLite FTS5: %s", str(sqlite_err))
+            # Continue even if SQLite fails so ChromaDB ingestion completes
 
         # 5. Update status
         if task_status:
@@ -428,6 +454,15 @@ async def delete_document(document_id: str):
             )
     except Exception as e:
         logger.error("Failed to delete from ChromaDB: %s", str(e))
+
+    # Remove from SQLite FTS5
+    try:
+        sqlite_conn = get_sqlite_connection()
+        sqlite_conn.execute("DELETE FROM document_chunks WHERE document_id = ?", (document_id,))
+        sqlite_conn.commit()
+        sqlite_conn.close()
+    except Exception as e:
+        logger.error("Failed to delete from SQLite FTS5: %s", str(e))
 
     # Remove uploaded file
     doc_info = _documents[document_id]
