@@ -9,8 +9,10 @@ from contextlib import asynccontextmanager
 import logging
 import os
 import sys
+from uuid import UUID
 
 import httpx
+from pydantic import Field
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -89,64 +91,76 @@ async def _get_client() -> httpx.AsyncClient:
 # Chat Endpoints
 # ---------------------------------------------------------------------------
 
+class ComparisonChatRequest(ChatRequest):
+    selected_document_ids: list[str] = Field(default_factory=list, max_length=2)
+
+
+def _chat_payload(request: ComparisonChatRequest) -> dict:
+    ids = request.selected_document_ids
+    if len(ids) not in (0, 2):
+        raise HTTPException(status_code=400, detail="Select exactly two PDFs.")
+    payload = request.model_dump()
+    if ids:
+        try:
+            ids = [str(UUID(item)) for item in ids]
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid PDF ID.") from exc
+        if ids[0] == ids[1]:
+            raise HTTPException(status_code=400, detail="Select two different PDFs.")
+        payload["selected_document_ids"] = ids
+    return payload
+
+
 @app.post("/api/v1/chat", dependencies=[Depends(validate_api_key)])
-async def chat_stream(request: ChatRequest):
-    """Streaming chat endpoint — proxies to RAG engine via SSE."""
+async def chat_stream(request: ComparisonChatRequest):
     if detect_prompt_injection(request.query):
-        raise HTTPException(status_code=400, detail="Query rejected due to security policy (potential prompt injection).")
-        
-    settings = get_settings()
+        raise HTTPException(status_code=400, detail="Query rejected due to security policy.")
     client = await _get_client()
-
+    upstream = None
     try:
-        # Forward to RAG engine streaming endpoint
-        async def proxy_stream():
-            async with client.stream(
-                "POST",
-                f"{settings.rag_engine_service_url}/rag/query",
-                json=request.model_dump(),
-            ) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    yield chunk
+        req = client.build_request("POST", f"{get_settings().rag_engine_service_url}/rag/query",
+                                   json=_chat_payload(request))
+        upstream = await client.send(req, stream=True)
+        upstream.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        await exc.response.aclose()
+        status = exc.response.status_code
+        raise HTTPException(status_code=status if status in (400, 403, 404, 422) else 502,
+                            detail="RAG request rejected.") from exc
+    except httpx.RequestError as exc:
+        if upstream is not None:
+            await upstream.aclose()
+        raise HTTPException(status_code=503, detail="RAG service unavailable.") from exc
 
-        return StreamingResponse(
-            proxy_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="RAG engine service unavailable.")
-    except Exception as e:
-        logger.error("Chat stream error: %s", str(e))
-        raise HTTPException(status_code=500, detail="An error occurred.")
+    async def relay():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        except httpx.RequestError:
+            logger.warning("RAG stream interrupted")
+            yield b'event: error\ndata: "RAG stream interrupted."\n\n'
+        finally:
+            await upstream.aclose()
+    return StreamingResponse(relay(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/v1/chat/sync", response_model=ChatResponse, dependencies=[Depends(validate_api_key)])
-async def chat_sync(request: ChatRequest):
-    """Non-streaming chat endpoint."""
+async def chat_sync(request: ComparisonChatRequest):
     if detect_prompt_injection(request.query):
-        raise HTTPException(status_code=400, detail="Query rejected due to security policy (potential prompt injection).")
-        
-    settings = get_settings()
+        raise HTTPException(status_code=400, detail="Query rejected due to security policy.")
     client = await _get_client()
-
     try:
-        response = await client.post(
-            f"{settings.rag_engine_service_url}/rag/query/sync",
-            json=request.model_dump(),
-        )
+        response = await client.post(f"{get_settings().rag_engine_service_url}/rag/query/sync",
+                                     json=_chat_payload(request))
         response.raise_for_status()
         return response.json()
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="RAG engine service unavailable.")
-    except Exception as e:
-        logger.error("Chat sync error: %s", str(e))
-        raise HTTPException(status_code=500, detail="An error occurred.")
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        raise HTTPException(status_code=status if status in (400, 403, 404, 422) else 502,
+                            detail="RAG request rejected.") from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail="RAG service unavailable.") from exc
 
 
 # ---------------------------------------------------------------------------

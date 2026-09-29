@@ -1,226 +1,176 @@
-"""RAG Query Engine Service — Retrieves context and generates answers.
-
-Pipeline: Query → Embed → Search ChromaDB → Build Prompt → LLM → Stream Response.
-"""
-
 from __future__ import annotations
-
+import json
 import logging
 import os
 import sys
 import time
-
 from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import JSONResponse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
 from shared.config import Settings, get_settings
 from shared.logging_config import RequestLoggingMiddleware, setup_logging
-from shared.models import ChatRequest, ChatResponse, ServiceHealth, SourceDocument
+from shared.models import ChatResponse, ServiceHealth, SourceDocument
 from shared.security import SecurityHeadersMiddleware
-
 from retriever import Retriever
 from prompt_builder import build_rag_prompt
 from llm_client import OllamaLLMClient
-
-# ---------------------------------------------------------------------------
-# Setup
-# ---------------------------------------------------------------------------
+from pdf_compare_tool import ComparisonChatRequest, prepare_comparison
 
 setup_logging("rag_engine", os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
-
 app = FastAPI(
     title="RAG Query Engine Service",
     version="0.1.0",
     docs_url="/rag/docs",
     openapi_url="/rag/openapi.json",
 )
-
 app.add_middleware(RequestLoggingMiddleware, service_name="rag_engine")
 app.add_middleware(SecurityHeadersMiddleware)
-
-# ---------------------------------------------------------------------------
-# Service clients (initialized lazily)
-# ---------------------------------------------------------------------------
-
 _retriever = None
 _llm_client = None
 
 
-def _get_retriever() -> Retriever:
+def _get_retriever():
     global _retriever
     if _retriever is None:
-        settings = get_settings()
+        s = get_settings()
         _retriever = Retriever(
-            chroma_host=settings.chroma_host,
-            collection_name=settings.chroma_collection,
-            ollama_host=settings.ollama_host,
-            embed_model=settings.ollama_embed_model,
+            chroma_host=s.chroma_host,
+            collection_name=s.chroma_collection,
+            ollama_host=s.ollama_host,
+            embed_model=s.ollama_embed_model,
         )
     return _retriever
 
 
-def _get_llm_client() -> OllamaLLMClient:
+def _get_llm_client():
     global _llm_client
     if _llm_client is None:
-        settings = get_settings()
+        s = get_settings()
         _llm_client = OllamaLLMClient(
-            ollama_host=settings.ollama_host,
-            model=settings.ollama_model,
-            timeout=settings.ollama_timeout,
+            ollama_host=s.ollama_host, model=s.ollama_model, timeout=s.ollama_timeout
         )
     return _llm_client
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
+def _source(r):
+    m = r["metadata"]
+    return {
+        "document_id": m.get("document_id", ""),
+        "filename": m.get("filename", "unknown"),
+        "chunk_index": m.get("chunk_index", 0),
+        "content": r["text"][:300],
+        "score": r["score"],
+        "page": m.get("page"),
+    }
+
 
 @app.post("/rag/query/sync", response_model=ChatResponse)
 async def query_sync(
-    request: ChatRequest,
-    settings: Settings = Depends(get_settings),
+    request: ComparisonChatRequest, settings: Settings = Depends(get_settings)
 ):
-    """Non-streaming RAG query — returns complete response."""
-    start_time = time.perf_counter()
-
+    start = time.perf_counter()
     try:
-        # 1. Retrieve relevant context
-        retriever = _get_retriever()
-        results = await retriever.search(request.query, top_k=request.top_k)
-
-        if not results:
-            logger.info("No relevant context found for query: %s", request.query[:100])
-
-        # 2. Build prompt
-        prompt = build_rag_prompt(
-            query=request.query,
-            context_chunks=results,
-        )
-
-        # 3. Generate answer via LLM
         llm = _get_llm_client()
-        answer = await llm.generate(
-            prompt=prompt,
-            temperature=request.temperature,
-        )
-
-        # Post-process to clean LaTeX math arrows to simple Unicode arrows
-        import re
-        answer = re.sub(
-            r'\$\\(?:right|left|up|down)arrow\$',
-            lambda m: "→" if "right" in m.group(0).lower() else "←" if "left" in m.group(0).lower() else "↑" if "up" in m.group(0).lower() else "↓",
-            answer,
-            flags=re.IGNORECASE
-        )
-        answer = re.sub(
-            r'\\(?:right|left|up|down)arrow',
-            lambda m: "→" if "right" in m.group(0).lower() else "←" if "left" in m.group(0).lower() else "↑" if "up" in m.group(0).lower() else "↓",
-            answer,
-            flags=re.IGNORECASE
-        )
-        answer = re.sub(r'\$\\(?:Right|Left)arrow\$', lambda m: "⇒" if "Right" in m.group(0) else "⇐", answer)
-        answer = re.sub(r'\\(?:Right|Left)arrow', lambda m: "⇒" if "Right" in m.group(0) else "⇐", answer)
-        answer = re.sub(r'\$\\to\$', "→", answer)
-        answer = re.sub(r'\\to\b', "→", answer)
-        answer = answer.replace("-->", "→").replace("->", "→").replace("==>", "⇒").replace("=>", "⇒")
-
-        # 4. Build source documents
-        sources = [
-            SourceDocument(
-                document_id=r["metadata"].get("document_id", ""),
-                filename=r["metadata"].get("filename", "unknown"),
-                chunk_index=r["metadata"].get("chunk_index", 0),
-                content=r["text"][:300],  # Truncate for response
-                score=r["score"],
-                page=r["metadata"].get("page"),
+        comparison = await prepare_comparison(request, llm)
+        if comparison is not None:
+            messages, _ = comparison
+            answer = (
+                await llm.chat_once(messages, temperature=request.temperature)
+            ).get("content", "")
+            sources = []
+        else:
+            results = await _get_retriever().search(request.query, top_k=request.top_k)
+            answer = await llm.generate(
+                prompt=build_rag_prompt(query=request.query, context_chunks=results),
+                temperature=request.temperature,
             )
-            for r in results
-        ]
-
-        duration_ms = (time.perf_counter() - start_time) * 1000
-        logger.info(
-            "Query processed in %.1fms: '%s' → %d sources",
-            duration_ms,
-            request.query[:80],
-            len(sources),
-        )
-
+            sources = [SourceDocument(**_source(r)) for r in results]
         return ChatResponse(
             answer=answer,
             sources=sources,
             query=request.query,
             model=settings.ollama_model,
-            processing_time_ms=round(duration_ms, 1),
+            processing_time_ms=round((time.perf_counter() - start) * 1000, 1),
         )
-
-    except Exception as e:
-        logger.error("RAG query failed: %s", str(e))
-        raise HTTPException(status_code=500, detail="An error occurred processing your query.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "RAG downstream HTTP error: method=%s url=%s status=%s body=%s",
+            exc.request.method,
+            exc.request.url,
+            exc.response.status_code,
+            exc.response.text[:1000],
+        )
+        raise HTTPException(status_code=500, detail="Unable to process query.") from exc
 
 
 @app.post("/rag/query")
-async def query_stream(request: ChatRequest):
-    """Streaming RAG query — returns SSE stream."""
+async def query_stream(request: ComparisonChatRequest):
     from sse_starlette.sse import EventSourceResponse
 
-    async def event_generator():
+    async def events():
         try:
-            # 1. Retrieve context
-            retriever = _get_retriever()
-            results = await retriever.search(request.query, top_k=request.top_k)
-
-            # Send sources first
-            import json
-            sources = [
-                {
-                    "document_id": r["metadata"].get("document_id", ""),
-                    "filename": r["metadata"].get("filename", "unknown"),
-                    "chunk_index": r["metadata"].get("chunk_index", 0),
-                    "content": r["text"][:300],
-                    "score": r["score"],
-                }
-                for r in results
-            ]
-            yield {"event": "sources", "data": json.dumps(sources)}
-
-            # 2. Build prompt
-            prompt = build_rag_prompt(query=request.query, context_chunks=results)
-
-            # 3. Stream LLM response
             llm = _get_llm_client()
-            async for token in llm.generate_stream(
-                prompt=prompt,
-                temperature=request.temperature,
-            ):
-                yield {"event": "token", "data": json.dumps(token)}
+            comparison = await prepare_comparison(request, llm)
+            if comparison is not None:
+                messages, data = comparison
+                yield {"event": "sources", "data": "[]"}
+                yield {
+                    "event": "comparison",
+                    "data": json.dumps(data, ensure_ascii=False),
+                }
+                async for token in llm.chat_stream_messages(
+                    messages, temperature=request.temperature
+                ):
+                    yield {
+                        "event": "token",
+                        "data": json.dumps(token, ensure_ascii=False),
+                    }
+            else:
+                results = await _get_retriever().search(
+                    request.query, top_k=request.top_k
+                )
+                yield {
+                    "event": "sources",
+                    "data": json.dumps(
+                        [_source(r) for r in results], ensure_ascii=False
+                    ),
+                }
+                prompt = build_rag_prompt(query=request.query, context_chunks=results)
+                async for token in llm.generate_stream(
+                    prompt=prompt, temperature=request.temperature
+                ):
+                    yield {
+                        "event": "token",
+                        "data": json.dumps(token, ensure_ascii=False),
+                    }
+            yield {"event": "done", "data": "{}"}
+        except Exception as exc:
+            logger.error(
+                        "RAG downstream HTTP error: method=%s url=%s status=%s body=%s",
+                        exc.request.method,
+                        exc.request.url,
+                        exc.response.status_code,
+                        exc.response.text[:1000],
+                    )
+            yield {"event": "error", "data": json.dumps("Unable to process query.")}
 
-            yield {"event": "done", "data": ""}
-
-        except Exception as e:
-            logger.error("Streaming query failed: %s", str(e))
-            yield {"event": "error", "data": "An error occurred processing your query."}
-
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(events())
 
 
 @app.get("/rag/health", response_model=ServiceHealth)
 async def health_check():
-    """Health check endpoint."""
-    ollama_ok = False
     try:
-        llm = _get_llm_client()
-        ollama_ok = await llm.health_check()
+        ok = await _get_llm_client().health_check()
     except Exception:
-        pass
-
+        ok = False
     return ServiceHealth(
         service="rag_engine",
-        status="healthy" if ollama_ok else "degraded",
+        status="healthy" if ok else "degraded",
         version="0.1.0",
-        details=f"Ollama: {'connected' if ollama_ok else 'unavailable'}",
+        details=f"Ollama: {'connected' if ok else 'unavailable'}",
     )
 
 

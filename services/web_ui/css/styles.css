@@ -1049,3 +1049,9 @@ body {
     .nav-btn { justify-content: center; padding: var(--spacing-md); }
     .nav-btn:hover { transform: none; }
 }
+
+.compare-picker { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:8px 2rem; background:var(--bg-secondary); }
+.compare-picker select { max-width:220px; background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border-color); padding:6px; }
+.comparison-section { max-height:320px; overflow:auto; margin-top:12px; border-top:1px solid var(--border-color); }
+.comparison-section table { border-collapse:collapse; width:100%; font-size:12px; }
+.comparison-section th,.comparison-section td { padding:5px; text-align:left; border-bottom:1px solid var(--border-color); }

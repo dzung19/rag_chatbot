@@ -112,6 +112,37 @@ class OllamaLLMClient:
                     continue
         logger.info("Ollama generate_stream completed.")
 
+    async def chat_once(self, messages: list[dict], tools: list[dict] | None = None,
+                        temperature: float = 0.0) -> dict:
+        client = await self._get_client()
+        payload = {"model": self.model, "messages": messages, "stream": False,
+                   "options": {"temperature": temperature, "num_ctx": 8192}}
+        if tools is not None:
+            payload["tools"] = tools
+        response = await client.post(f"{self.ollama_host}/api/chat", json=payload)
+        response.raise_for_status()
+        return response.json().get("message", {})
+
+    async def chat_stream_messages(self, messages: list[dict], temperature: float = 0.7) -> AsyncGenerator[str, None]:
+        client = await self._get_client()
+        async with client.stream("POST", f"{self.ollama_host}/api/chat", json={
+            "model": self.model, "messages": messages, "stream": True,
+            "options": {"temperature": temperature, "num_ctx": 8192},
+        }) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                content = data.get("message", {}).get("content", "")
+                if content:
+                    yield content
+                if data.get("done"):
+                    break
+
     async def health_check(self) -> bool:
         """Check if Ollama is reachable and model is loaded."""
         try:

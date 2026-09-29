@@ -183,6 +183,7 @@ const ApiClient = (() => {
             let buffer = "";
             let eventType = "";
             let dataParts = [];
+            let finished = false;
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -211,8 +212,10 @@ const ApiClient = (() => {
                                 } catch {
                                     callbacks.onToken(dataStr);
                                 }
+                            } else if (eventType === "comparison" && callbacks.onComparison) {
+                                try { callbacks.onComparison(JSON.parse(dataStr)); } catch { /* invalid */ }
                             } else if (eventType === "done" && callbacks.onDone) {
-                                callbacks.onDone();
+                                if (!finished) { finished = true; callbacks.onDone(); }
                             } else if (eventType === "error" && callbacks.onError) {
                                 callbacks.onError(dataStr);
                             }
@@ -248,16 +251,18 @@ const ApiClient = (() => {
                     } catch {
                         callbacks.onToken(dataStr);
                     }
+                } else if (eventType === "comparison" && callbacks.onComparison) {
+                    try { callbacks.onComparison(JSON.parse(dataStr)); } catch { /* invalid */ }
                 } else if (eventType === "done" && callbacks.onDone) {
-                    callbacks.onDone();
+                    if (!finished) { finished = true; callbacks.onDone(); }
                 } else if (eventType === "error" && callbacks.onError) {
                     callbacks.onError(dataStr);
                 }
             }
 
             // Ensure done is called even if no explicit done event
-            if (callbacks.onDone) {
-                callbacks.onDone();
+            if (!finished && callbacks.onDone) {
+                finished = true; callbacks.onDone();
             }
         } catch (error) {
             if (callbacks.onError) {

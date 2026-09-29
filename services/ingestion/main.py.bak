@@ -478,9 +478,6 @@ async def delete_document(document_id: str):
     return JSONResponse(content={"message": "Document deleted successfully."})
 
 
-from compare_router import install as install_compare_router
-app.include_router(install_compare_router(_documents, UPLOAD_DIR))
-
 @app.get("/ingest/health", response_model=ServiceHealth)
 async def health_check():
     """Health check endpoint."""

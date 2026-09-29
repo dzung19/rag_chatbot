@@ -19,6 +19,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const chatMessages = document.getElementById("chat-messages");
     const chatInput = document.getElementById("chat-input");
     const sendBtn = document.getElementById("send-btn");
+    const compareLeft = document.getElementById("compare-left");
+    const compareRight = document.getElementById("compare-right");
     const charCount = document.getElementById("char-count");
     const welcomeMessage = document.getElementById("welcome-message");
 
@@ -64,6 +66,7 @@ document.addEventListener("DOMContentLoaded", () => {
         ApiClient.setApiKey(storedKey);
         apiKeyModal.classList.add("hidden");
         checkHealth();
+        loadDocuments();
     }
 
     apiKeySubmit.addEventListener("click", () => {
@@ -74,6 +77,7 @@ document.addEventListener("DOMContentLoaded", () => {
             sessionStorage.setItem("rag_api_key", key);
             apiKeyModal.classList.add("hidden");
             checkHealth();
+        loadDocuments();
         }
     });
 
@@ -98,7 +102,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }
 
             // Auto-refresh documents when switching to documents view
-            if (viewName === "documents") {
+            if (viewName === "documents" || viewName === "chat") {
                 loadDocuments();
             }
         });
@@ -165,6 +169,11 @@ document.addEventListener("DOMContentLoaded", () => {
         const query = chatInput.value.trim();
         if (!query || isStreaming) return;
 
+        const leftId = compareLeft.value, rightId = compareRight.value;
+        if ((leftId && !rightId) || (!leftId && rightId) || (leftId && leftId === rightId)) {
+            appendMessage("assistant", "Select two different PDFs or clear both selections."); return;
+        }
+        const selectedDocumentIds = leftId && rightId ? [leftId, rightId] : [];
         // Hide welcome message
         if (welcomeMessage) {
             welcomeMessage.style.display = "none";
@@ -188,14 +197,16 @@ document.addEventListener("DOMContentLoaded", () => {
         // Start streaming response
         let responseText = "";
         let responseSources = [];
+        let comparisonResult = null;
         let messageEl = null;
 
         ApiClient.streamChatQuery(
-            { query, top_k: 5, temperature: 0.7, stream: true },
+            { query, top_k: 5, temperature: 0.7, stream: true, selected_document_ids: selectedDocumentIds },
             {
                 onSources: (sources) => {
                     responseSources = sources;
                 },
+                onComparison: (data) => { comparisonResult = data; },
                 onToken: (token) => {
                     // Remove typing indicator on first token
                     if (typingEl.parentNode) {
@@ -232,8 +243,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
                     // If no response received, show fallback
                     if (!messageEl) {
-                        appendMessage("assistant", responseText || "No response received. Please try again.");
+                        messageEl = appendMessage("assistant", responseText || "No response received. Please try again.");
                     }
+                    if (comparisonResult) appendComparison(messageEl.querySelector(".message-content"), comparisonResult);
                     scrollToBottom();
                 },
                 onError: (error) => {
@@ -382,6 +394,29 @@ document.addEventListener("DOMContentLoaded", () => {
         });
 
         contentWrapper.appendChild(sourcesDiv);
+    }
+
+    function appendComparison(container, comparison) {
+        if (!container) return;
+        const section = document.createElement("div"); section.className = "comparison-section";
+        const title = document.createElement("strong");
+        title.textContent = `Comparison: ${JSON.stringify(comparison.summary || {})}`;
+        section.appendChild(title);
+        const table = document.createElement("table"), head = document.createElement("tr");
+        for (const label of ["Field", "PDF A (page)", "PDF B (page)", "Status"]) {
+            const th = document.createElement("th"); th.textContent = label; head.appendChild(th);
+        }
+        table.appendChild(head);
+        for (const row of comparison.results || []) {
+            if (row.status === "equal") continue;
+            const tr = document.createElement("tr"), a = (row.left || [])[0], b = (row.right || [])[0];
+            for (const value of [row.key, a ? `${a.value} (p.${a.page})` : "—",
+                                 b ? `${b.value} (p.${b.page})` : "—", row.status]) {
+                const td = document.createElement("td"); td.textContent = String(value || ""); tr.appendChild(td);
+            }
+            table.appendChild(tr);
+        }
+        section.appendChild(table); container.appendChild(section);
     }
 
     function createTypingIndicator() {
@@ -547,6 +582,7 @@ document.addEventListener("DOMContentLoaded", () => {
         try {
             const data = await ApiClient.getJSON("/documents");
             renderDocumentList(data.documents || []);
+            refreshPdfSelectors(data.documents || []);
         } catch (error) {
             // Show empty state on error
             renderDocumentList([]);
@@ -555,6 +591,19 @@ document.addEventListener("DOMContentLoaded", () => {
                 sessionStorage.removeItem("rag_api_key");
                 apiKeyModal.classList.remove("hidden");
             }
+        }
+    }
+
+    function refreshPdfSelectors(documents) {
+        for (const [select, label] of [[compareLeft, "Select first PDF"], [compareRight, "Select second PDF"]]) {
+            const current = select.value; select.replaceChildren();
+            const empty = document.createElement("option"); empty.value = ""; empty.textContent = label; select.appendChild(empty);
+            for (const doc of documents) {
+                if (doc.file_type !== "pdf" || doc.status !== "completed") continue;
+                const option = document.createElement("option"); option.value = doc.document_id;
+                option.textContent = doc.filename; select.appendChild(option);
+            }
+            if ([...select.options].some(option => option.value === current)) select.value = current;
         }
     }
 
