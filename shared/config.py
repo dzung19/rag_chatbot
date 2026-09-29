@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     ollama_timeout: int = Field(default=300, description="LLM request timeout in seconds")
 
     # --- ChromaDB ---
-    chroma_host: str = Field(default="http://localhost:8003")
+    chroma_host: str = Field(default="http://chromadb:8000")
     chroma_collection: str = Field(default="rag_documents")
 
     # --- Document Processing ---

@@ -1,32 +1,18 @@
 """Text chunking for document ingestion.
 
-Upgraded from plain fixed-size + overlap splitting to a layered strategy:
-
-  1. Structure-aware segmentation  - split on real document boundaries
-     (markdown headings, numbered headings, and the ``[Slide n]`` /
-     ``[Sheet: x]`` / ``[Table n]`` markers emitted by ``document_parser``)
-     before any size-based splitting happens.
-  2. Parent / child chunking       - small children are embedded for precise
-     vector search, while the larger parent block is carried along so the
-     retriever can hand full context to the LLM.
-  3. Contextual headers            - each child gets a
-     ``filename > section`` breadcrumb prepended to the text that is embedded,
-     which measurably improves recall on short, pronoun-heavy chunks.
-  4. Page-aware ingestion          - ``chunk_pages`` keeps the real page /
-     slide / sheet number instead of hardcoding ``page=0``.
-
-``chunk_text`` keeps its original signature so existing callers do not break.
+Uses langchain-text-splitters for recursive character splitting with
+configurable chunk size and overlap.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 logger = logging.getLogger(__name__)
 
+<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -244,24 +230,52 @@ def chunk_pages(
     )
     return results
 
+=======
+>>>>>>> parent of 41b1889 (update)
 
 def chunk_text(
     text: str,
-    chunk_size: int = DEFAULT_CHUNK_SIZE,
-    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-    **kwargs,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 200,
 ) -> list[dict]:
-    """Backward-compatible wrapper over :func:`chunk_pages`.
+    """Split text into overlapping chunks.
 
-    Accepts a single blob of text and returns the same dict shape as before
-    (plus the new 'embed_text', 'section', 'parent_index' and 'parent_text'
-    keys, which existing callers can safely ignore).
+    Args:
+        text: Full document text.
+        chunk_size: Maximum characters per chunk.
+        chunk_overlap: Overlap between consecutive chunks.
+
+    Returns:
+        List of dicts with 'text', 'chunk_index', and 'page' keys.
     """
     if not text or not text.strip():
         return []
-    return chunk_pages(
-        [text],
+
+    splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        **kwargs,
+        length_function=len,
+        separators=["\n\n", "\n", ". ", " ", ""],
+        is_separator_regex=False,
     )
+
+    chunks = splitter.split_text(text)
+
+    result = []
+    for i, chunk_text_content in enumerate(chunks):
+        if chunk_text_content.strip():
+            result.append(
+                {
+                    "text": chunk_text_content.strip(),
+                    "chunk_index": i,
+                    "page": 0,  # Page tracking handled at parser level
+                }
+            )
+
+    logger.debug(
+        "Chunked text into %d chunks (size=%d, overlap=%d)",
+        len(result),
+        chunk_size,
+        chunk_overlap,
+    )
+    return result
