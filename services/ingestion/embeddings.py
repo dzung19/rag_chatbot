@@ -1,7 +1,7 @@
 """Embedding client for Ollama.
 
 Generates text embeddings using the nomic-embed-text model via Ollama's
-/api/embed endpoint. Supports batch embedding.
+/api/embed endpoint. Supports batch embedding and HTTP connection pooling.
 """
 
 from __future__ import annotations
@@ -30,7 +30,14 @@ class EmbeddingClient:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.timeout, connect=15.0),
+                limits=httpx.Limits(
+                    max_keepalive_connections=10,
+                    max_connections=20,
+                    keepalive_expiry=60.0,
+                ),
+            )
         return self._client
 
     async def embed_single(self, text: str) -> list[float]:
@@ -54,10 +61,10 @@ class EmbeddingClient:
     async def embed_batch(
         self, texts: list[str], batch_size: int = 32
     ) -> list[list[float]]:
-        """Generate embeddings for multiple texts.
+        """Generate embeddings for multiple texts in sub-batches.
 
         Ollama's /api/embed supports batch input. We process in sub-batches
-        to avoid memory issues with very large document sets.
+        to avoid memory pressure with large document sets.
 
         Args:
             texts: List of texts to embed.

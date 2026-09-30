@@ -43,7 +43,7 @@ from shared.security import SecurityHeadersMiddleware
 from shared.sqlite_db import get_sqlite_connection
 
 from document_parser import parse_document
-from chunker import chunk_text
+from chunker import chunk_text, chunk_document_pages
 from embeddings import EmbeddingClient
 
 # ---------------------------------------------------------------------------
@@ -158,14 +158,20 @@ def _get_chroma_client():
     return client
 
 
+_chroma_collection = None
+
+
 def _get_collection():
-    """Get or create the ChromaDB collection."""
-    client = _get_chroma_client()
-    settings = get_settings()
-    return client.get_or_create_collection(
-        name=settings.chroma_collection,
-        metadata={"hnsw:space": "cosine"},
-    )
+    """Get or create the cached ChromaDB collection."""
+    global _chroma_collection
+    if _chroma_collection is None:
+        client = _get_chroma_client()
+        settings = get_settings()
+        _chroma_collection = client.get_or_create_collection(
+            name=settings.chroma_collection,
+            metadata={"hnsw:space": "cosine"},
+        )
+    return _chroma_collection
 
 
 # ---------------------------------------------------------------------------
@@ -184,23 +190,27 @@ async def _process_document(
         task_status.status = IngestionStatusEnum.PROCESSING
 
     try:
-        # 1. Parse document
+        # 1. Parse document (yields per page/slide/sheet)
         logger.info("Parsing document %s (%s)", document_id, original_filename)
         text_pages = list(parse_document(str(file_path), doc_type.value))
 
         if not text_pages:
             raise ValueError("No text extracted from document.")
 
-        full_text = "\n\n".join(text_pages)
-
-        # 2. Chunk text
+        # 2. Chunk text per-page using Strategy 5 (structure-aware + contextual headers)
         settings = get_settings()
-        chunks = chunk_text(
-            full_text,
+        chunks = chunk_document_pages(
+            pages=text_pages,
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
+            source_filename=original_filename,
         )
-        logger.info("Document %s split into %d chunks", document_id, len(chunks))
+        logger.info(
+            "Document %s (%d pages) split into %d chunks",
+            document_id,
+            len(text_pages),
+            len(chunks),
+        )
 
         if task_status:
             task_status.total_chunks = len(chunks)
@@ -211,27 +221,35 @@ async def _process_document(
         embeddings = await embed_client.embed_batch(chunk_texts)
         logger.info("Generated %d embeddings for document %s", len(embeddings), document_id)
 
-        # 4. Store in ChromaDB
+        # 4. Store in ChromaDB with enriched metadata & batching
         collection = _get_collection()
-        ids = [f"{document_id}_chunk_{i}" for i in range(len(chunks))]
+        ingested_at = datetime.now(timezone.utc).isoformat()
+        ids = [f"{document_id}_chunk_{c['chunk_index']}" for c in chunks]
         metadatas = [
             {
                 "document_id": document_id,
                 "filename": original_filename,
-                "chunk_index": c["chunk_index"],
-                "page": c.get("page", 0),
                 "source": original_filename,
+                "chunk_index": c["chunk_index"],
+                "total_chunks": len(chunks),
+                "page": c.get("page", 0),
+                "heading": c.get("heading", ""),
+                "file_type": doc_type.value,
+                "ingested_at": ingested_at,
             }
             for c in chunks
         ]
 
-        # Batch upsert (ChromaDB handles batching internally)
-        collection.upsert(
-            ids=ids,
-            embeddings=embeddings,
-            documents=chunk_texts,
-            metadatas=metadatas,
-        )
+        # Batch upsert to ChromaDB in chunks of 100 to avoid request timeouts
+        chroma_batch_size = 100
+        for i in range(0, len(chunks), chroma_batch_size):
+            b_slice = slice(i, i + chroma_batch_size)
+            collection.upsert(
+                ids=ids[b_slice],
+                embeddings=embeddings[b_slice],
+                documents=chunk_texts[b_slice],
+                metadatas=metadatas[b_slice],
+            )
 
         # 4.5. Store in SQLite FTS5 for Hybrid Search
         try:
@@ -244,12 +262,14 @@ async def _process_document(
                     f"{document_id}_chunk_{c['chunk_index']}", 
                     document_id, 
                     original_filename, 
+                    c.get("page", 0),
+                    c.get("heading", ""),
                     c["text"]
                 )
                 for c in chunks
             ]
             sqlite_conn.executemany(
-                "INSERT INTO document_chunks (id, document_id, filename, text) VALUES (?, ?, ?, ?)",
+                "INSERT INTO document_chunks (id, document_id, filename, page, heading, text) VALUES (?, ?, ?, ?, ?, ?)",
                 sqlite_data
             )
             sqlite_conn.commit()
