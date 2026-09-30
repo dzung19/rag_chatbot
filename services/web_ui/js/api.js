@@ -52,6 +52,7 @@ const ApiClient = (() => {
         const response = await fetch(url, {
             ...options,
             headers,
+            cache: options.cache || "no-store", // Prevent browser caching by default
         });
 
         if (!response.ok) {
