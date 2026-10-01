@@ -12,6 +12,7 @@ import logging
 class ComparisonChatRequest(ChatRequest):
     selected_document_ids: list[str] = Field(default_factory=list, max_length=2)
 
+
 logger = logging.getLogger(__name__)
 COMPARE_TOOL = {
     "type": "function",
@@ -34,10 +35,10 @@ async def prepare_comparison(request: ComparisonChatRequest, llm):
     if len(ids) != 2:
         raise HTTPException(status_code=400, detail="Select two PDFs.")
     try:
-        left, right = [str(UUID(item)) for item in ids]
+        bl_document_id, checklist_document_id = [str(UUID(item)) for item in ids]
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail="Invalid PDF ID.") from exc
-    if left == right:
+    if bl_document_id == checklist_document_id:
         raise HTTPException(status_code=400, detail="Select different PDFs.")
     messages = [
         {
@@ -62,13 +63,30 @@ async def prepare_comparison(request: ComparisonChatRequest, llm):
         logger.info(
             "Calling comparison service: base=%s left=%s right=%s",
             base,
-            left,
-            right,
+            bl_document_id,
+            checklist_document_id,
         )
         async with httpx.AsyncClient(timeout=90.0) as client:
             response = await client.get(
                 f"{base}/ingest/compare",
-                params={"left_document_id": left, "right_document_id": right},
+                params={
+                    "comparison_type": "bl_vs_bl_check_list",
+                    "documents": {
+                        "bl": {
+                            "document_id": "...",
+                            "filename": "830753.pdf",
+                            "role": "BL",
+                        },
+                        "bl_check_list": {
+                            "document_id": "...",
+                            "filename": "B_830753.pdf",
+                            "role": "BL Check List",
+                        },
+                    },
+                    "summary": {},
+                    "warnings": [],
+                    "results": [],
+                },
             )
             response.raise_for_status()
             data = response.json()

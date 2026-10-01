@@ -7,12 +7,11 @@ configurable chunk size and overlap.
 from __future__ import annotations
 
 import logging
-
+import re
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 logger = logging.getLogger(__name__)
 
-<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -229,9 +228,6 @@ def chunk_pages(
         parent_overlap,
     )
     return results
-
-=======
->>>>>>> parent of 41b1889 (update)
 
 def chunk_text(
     text: str,

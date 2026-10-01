@@ -1,0 +1,20 @@
+{
+  "name": "compare_bl_checklist",
+  "version": "1.0.0",
+  "enabled": true,
+  "tool_name": "compare_selected_pdfs",
+  "max_tool_rows_for_llm": 200,
+  "trigger_terms": [
+    "compare",
+    "comparison",
+    "check bl",
+    "compare bl",
+    "bl check list",
+    "bl checklist",
+    "so sánh",
+    "đối chiếu",
+    "kiểm tra bl",
+    "比較",
+    "照合"
+  ]
+}

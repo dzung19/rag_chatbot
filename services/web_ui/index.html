@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -10,6 +11,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/css/styles.css">
 </head>
+
 <body>
     <!-- Sidebar Navigation -->
     <aside class="sidebar" id="sidebar">
@@ -55,27 +57,32 @@
                     <div class="welcome-message" id="welcome-message">
                         <div class="welcome-icon">🤖</div>
                         <h2>Hello! I'm your Knowledge Assistant</h2>
-                        <p>Upload documents and ask me anything about them. I'll find the relevant information and provide answers with source citations.</p>
+                        <p>Upload documents and ask me anything about them. I'll find the relevant information and
+                            provide answers with source citations.</p>
                         <div class="welcome-hints">
-                            <button class="hint-btn" data-hint="What documents have been uploaded?">📋 What documents are available?</button>
-                            <button class="hint-btn" data-hint="Summarize the key points from the documents">📝 Summarize key points</button>
-                            <button class="hint-btn" data-hint="What are the main topics covered?">🔍 Main topics covered</button>
+                            <button class="hint-btn" data-hint="What documents have been uploaded?">📋 What documents
+                                are available?</button>
+                            <button class="hint-btn" data-hint="Summarize the key points from the documents">📝
+                                Summarize key points</button>
+                            <button class="hint-btn" data-hint="What are the main topics covered?">🔍 Main topics
+                                covered</button>
                         </div>
                     </div>
                 </div>
-                <div class="compare-picker"><label for="compare-left">PDF A</label>
-                    <select id="compare-left"><option value="">Select first PDF</option></select>
-                    <label for="compare-right">PDF B</label>
-                    <select id="compare-right"><option value="">Select second PDF</option></select>
-                    <span>Select two PDFs, then ask to compare them.</span></div>
+                <div class="compare-picker"><label for="compare-left">BL</label>
+                    <select id="compare-left">
+                        <option value="">Select BL</option>
+                    </select>
+                    <label for="compare-right">BL Check List</label>
+                    <select id="compare-right">
+                        <option value="">Select BL Check List</option>
+                    </select>
+                    <span>Select two PDFs, then ask to compare them.</span>
+                </div>
                 <div class="chat-input-area">
                     <div class="chat-input-wrapper">
-                        <textarea
-                            id="chat-input"
-                            placeholder="Ask a question about your documents..."
-                            rows="1"
-                            maxlength="5000"
-                        ></textarea>
+                        <textarea id="chat-input" placeholder="Ask a question about your documents..." rows="1"
+                            maxlength="5000"></textarea>
                         <button class="send-btn" id="send-btn" disabled>
                             <span class="send-icon">➤</span>
                         </button>
@@ -108,10 +115,13 @@
                 <div class="upload-progress-list" id="upload-progress-list"></div>
 
                 <!-- Document List -->
-                <div class="document-list-header" style="display: flex; justify-content: space-between; align-items: center;">
+                <div class="document-list-header"
+                    style="display: flex; justify-content: space-between; align-items: center;">
                     <h2>Indexed Documents</h2>
                     <div class="header-actions" style="display: flex; gap: 10px;">
-                        <button class="sync-btn" id="sync-sharepoint-btn" style="background: var(--primary-color); color: white; border: none; border-radius: 6px; padding: 0.5rem 1rem; cursor: pointer; font-weight: 500; font-size: 0.85rem; transition: background 0.2s;">☁️ Sync SharePoint</button>
+                        <button class="sync-btn" id="sync-sharepoint-btn"
+                            style="background: var(--primary-color); color: white; border: none; border-radius: 6px; padding: 0.5rem 1rem; cursor: pointer; font-weight: 500; font-size: 0.85rem; transition: background 0.2s;">☁️
+                            Sync SharePoint</button>
                         <button class="refresh-btn" id="refresh-docs-btn">🔄 Refresh</button>
                     </div>
                 </div>
@@ -210,4 +220,5 @@
     <script src="/js/api.js"></script>
     <script src="/js/app.js"></script>
 </body>
+
 </html>

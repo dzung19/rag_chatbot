@@ -59,7 +59,7 @@ class OllamaLLMClient:
                 "stream": False,
                 "options": {
                     "temperature": temperature,
-                    "num_ctx": 8192,
+                    "num_ctx": 32768,
                 },
             },
         )
@@ -92,7 +92,7 @@ class OllamaLLMClient:
                 "stream": True,
                 "options": {
                     "temperature": temperature,
-                    "num_ctx": 8192,
+                    "num_ctx": 32768,
                 },
             },
         ) as response:
@@ -116,7 +116,7 @@ class OllamaLLMClient:
                         temperature: float = 0.0) -> dict:
         client = await self._get_client()
         payload = {"model": self.model, "messages": messages, "stream": False,
-                   "options": {"temperature": temperature, "num_ctx": 8192}}
+                   "options": {"temperature": temperature, "num_ctx": 32768}}
         if tools is not None:
             payload["tools"] = tools
         response = await client.post(f"{self.ollama_host}/api/chat", json=payload)
@@ -127,7 +127,7 @@ class OllamaLLMClient:
         client = await self._get_client()
         async with client.stream("POST", f"{self.ollama_host}/api/chat", json={
             "model": self.model, "messages": messages, "stream": True,
-            "options": {"temperature": temperature, "num_ctx": 8192},
+            "options": {"temperature": temperature, "num_ctx": 32768},
         }) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():

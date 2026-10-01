@@ -77,7 +77,7 @@ document.addEventListener("DOMContentLoaded", () => {
             sessionStorage.setItem("rag_api_key", key);
             apiKeyModal.classList.add("hidden");
             checkHealth();
-        loadDocuments();
+            loadDocuments();
         }
     });
 
@@ -116,7 +116,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const data = await ApiClient.healthCheck();
             statusDot.className = "status-dot connected";
             statusText.textContent = data.status === "healthy" ? "Connected" : "Degraded";
-            
+
             // Dynamically update active model name in the UI
             if (data.model_name) {
                 const modelInfo = document.getElementById("model-info");
@@ -254,7 +254,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     }
                     isStreaming = false;
                     sendBtn.disabled = chatInput.value.trim().length === 0;
-                    
+
                     if (error.includes("401") || error.includes("403") || error.toLowerCase().includes("forbidden") || error.toLowerCase().includes("api key")) {
                         appendMessage("assistant", "Authentication failed. The API key is invalid or expired. Please check your key.");
                         sessionStorage.removeItem("rag_api_key");
@@ -411,7 +411,7 @@ document.addEventListener("DOMContentLoaded", () => {
             if (row.status === "equal") continue;
             const tr = document.createElement("tr"), a = (row.left || [])[0], b = (row.right || [])[0];
             for (const value of [row.key, a ? `${a.value} (p.${a.page})` : "—",
-                                 b ? `${b.value} (p.${b.page})` : "—", row.status]) {
+            b ? `${b.value} (p.${b.page})` : "—", row.status]) {
                 const td = document.createElement("td"); td.textContent = String(value || ""); tr.appendChild(td);
             }
             table.appendChild(tr);
@@ -595,17 +595,101 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function refreshPdfSelectors(documents) {
-        for (const [select, label] of [[compareLeft, "Select first PDF"], [compareRight, "Select second PDF"]]) {
-            const current = select.value; select.replaceChildren();
-            const empty = document.createElement("option"); empty.value = ""; empty.textContent = label; select.appendChild(empty);
-            for (const doc of documents) {
-                if (doc.file_type !== "pdf" || doc.status !== "completed") continue;
-                const option = document.createElement("option"); option.value = doc.document_id;
-                option.textContent = doc.filename; select.appendChild(option);
-            }
-            if ([...select.options].some(option => option.value === current)) select.value = current;
+        const pdfs = documents.filter(doc => {
+            const fileType = String(
+                doc.file_type || "",
+            ).toLowerCase();
+
+            const status = String(
+                doc.status || "",
+            ).toLowerCase();
+
+            return (
+                fileType === "pdf" &&
+                status === "completed"
+            );
+        });
+
+        refreshOnePdfSelector(
+            compareLeft,
+            "Select BL",
+            pdfs,
+        );
+
+        refreshOnePdfSelector(
+            compareRight,
+            "Select BL Check List",
+            pdfs,
+        );
+
+        preventSamePdfSelection();
+    }
+
+    function refreshOnePdfSelector(
+        select,
+        placeholder,
+        documents,
+    ) {
+        const previousValue = select.value;
+
+        select.replaceChildren();
+
+        const placeholderOption =
+            document.createElement("option");
+
+        placeholderOption.value = "";
+        placeholderOption.textContent =
+            placeholder;
+
+        select.appendChild(
+            placeholderOption,
+        );
+
+        for (const doc of documents) {
+            const option =
+                document.createElement("option");
+
+            option.value = doc.document_id;
+            option.textContent =
+                doc.filename;
+
+            select.appendChild(option);
+        }
+
+        const stillExists =
+            documents.some(
+                doc =>
+                    doc.document_id ===
+                    previousValue,
+            );
+
+        select.value =
+            stillExists
+                ? previousValue
+                : "";
+    }
+
+    function preventSamePdfSelection() {
+        const leftId =
+            compareLeft.value;
+
+        for (
+            const option
+            of compareRight.options
+        ) {
+            option.disabled =
+                option.value !== "" &&
+                option.value === leftId;
+        }
+
+        if (
+            compareRight.value !== "" &&
+            compareRight.value === leftId
+        ) {
+            compareRight.value = "";
         }
     }
+
 
     function renderDocumentList(documents) {
         // Clear existing content safely
