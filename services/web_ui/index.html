@@ -64,7 +64,12 @@
                     </div>
                 </div>
                 <div class="chat-input-area">
-                    <div class="chat-input-wrapper">
+                    <div class="chat-attachments" id="chat-attachments"></div>
+                    <div class="chat-input-wrapper" id="chat-input-wrapper">
+                        <input type="file" id="chat-file-input" accept=".pdf,.docx,.pptx,.xlsx,.txt,.md" multiple hidden>
+                        <button class="attach-btn" id="attach-btn" title="Attach documents">
+                            <span class="attach-icon">+</span>
+                        </button>
                         <textarea
                             id="chat-input"
                             placeholder="Ask a question about your documents..."
@@ -203,6 +208,9 @@
     </div>
 
     <script src="/js/api.js"></script>
+    <script src="/js/chat.js"></script>
+    <script src="/js/documents.js"></script>
+    <script src="/js/logs.js"></script>
     <script src="/js/app.js"></script>
 </body>
 </html>
