@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     ollama_num_predict: int = Field(default=1024, description="Max output tokens per response")
 
     # --- ChromaDB ---
-    chroma_host: str = Field(default="http://chromadb:8000")
+    chroma_host: str = Field(default="http://127.0.0.1:8003")
     chroma_collection: str = Field(default="rag_documents")
 
     # --- Document Processing ---

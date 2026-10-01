@@ -47,7 +47,7 @@ class OllamaLLMClient:
     def _build_options(
         self,
         temperature: float = 0.7,
-        num_ctx: int = 8192,
+        num_ctx: int = 32768,
         num_predict: int = 1024,
         repeat_penalty: float = 1.1,
         top_p: float = 0.9,
