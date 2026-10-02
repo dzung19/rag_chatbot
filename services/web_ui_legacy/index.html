@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="RAG Chatbot — Internal knowledge assistant powered by AI">
+    <title>RAG Chatbot — Knowledge Assistant</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <div class="logo">
+                <div class="logo-icon" id="logo-icon"></div>
+                <span class="logo-text">RAG Chatbot</span>
+            </div>
+        </div>
+        <nav class="sidebar-nav">
+            <button class="nav-btn active" data-view="chat" id="nav-chat">
+                <span class="nav-icon">💬</span>
+                <span class="nav-label">Chat</span>
+            </button>
+            <button class="nav-btn" data-view="documents" id="nav-documents">
+                <span class="nav-icon">📄</span>
+                <span class="nav-label">Documents</span>
+            </button>
+            <button class="nav-btn" data-view="logs" id="nav-logs">
+                <span class="nav-icon">📊</span>
+                <span class="nav-label">Logs</span>
+            </button>
+        </nav>
+        <div class="sidebar-footer">
+            <div class="connection-status" id="connection-status">
+                <span class="status-dot"></span>
+                <span class="status-text">Checking...</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+
+        <!-- ============ CHAT VIEW ============ -->
+        <section class="view active" id="view-chat">
+            <div class="view-header">
+                <h1>Knowledge Assistant</h1>
+                <p class="view-subtitle">Ask questions about your company documents</p>
+            </div>
+            <div class="chat-container">
+                <div class="chat-messages" id="chat-messages">
+                    <div class="welcome-message" id="welcome-message">
+                        <div class="welcome-icon">🤖</div>
+                        <h2>Hello! I'm your Knowledge Assistant</h2>
+                        <p>Upload documents and ask me anything about them. I'll find the relevant information and provide answers with source citations.</p>
+                        <div class="welcome-hints">
+                            <button class="hint-btn" data-hint="What documents have been uploaded?">📋 What documents are available?</button>
+                            <button class="hint-btn" data-hint="Summarize the key points from the documents">📝 Summarize key points</button>
+                            <button class="hint-btn" data-hint="What are the main topics covered?">🔍 Main topics covered</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="chat-input-area">
+                    <div class="chat-attachments" id="chat-attachments"></div>
+                    <div class="chat-input-wrapper" id="chat-input-wrapper">
+                        <input type="file" id="chat-file-input" accept=".pdf,.docx,.pptx,.xlsx,.txt,.md" multiple hidden>
+                        <button class="attach-btn" id="attach-btn" title="Attach documents">
+                            <span class="attach-icon">+</span>
+                        </button>
+                        <textarea
+                            id="chat-input"
+                            placeholder="Ask a question about your documents..."
+                            rows="1"
+                            maxlength="5000"
+                        ></textarea>
+                        <button class="send-btn" id="send-btn" disabled>
+                            <span class="send-icon">➤</span>
+                        </button>
+                    </div>
+                    <div class="chat-input-footer">
+                        <span class="char-count" id="char-count">0 / 5000</span>
+                        <span class="model-info" id="model-info">Gemma 4 E2B</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============ DOCUMENTS VIEW ============ -->
+        <section class="view" id="view-documents">
+            <div class="view-header">
+                <h1>Document Management</h1>
+                <p class="view-subtitle">Upload and manage your knowledge base</p>
+            </div>
+            <div class="documents-container">
+                <!-- Upload Area -->
+                <div class="upload-zone" id="upload-zone">
+                    <div class="upload-icon">📁</div>
+                    <h3>Drop files here or click to upload</h3>
+                    <p>Supports: PDF, DOCX, PPTX, XLSX, TXT, Markdown (max 50MB)</p>
+                    <input type="file" id="file-input" accept=".pdf,.docx,.pptx,.xlsx,.txt,.md" multiple hidden>
+                    <button class="upload-btn" id="upload-btn">Select Files</button>
+                </div>
+
+                <!-- Upload Progress -->
+                <div class="upload-progress-list" id="upload-progress-list"></div>
+
+                <!-- Document List -->
+                <div class="document-list-header" style="display: flex; justify-content: space-between; align-items: center;">
+                    <h2>Indexed Documents</h2>
+                    <div class="header-actions" style="display: flex; gap: 10px;">
+                        <button class="sync-btn" id="sync-sharepoint-btn" style="background: var(--primary-color); color: white; border: none; border-radius: 6px; padding: 0.5rem 1rem; cursor: pointer; font-weight: 500; font-size: 0.85rem; transition: background 0.2s;">☁️ Sync SharePoint</button>
+                        <button class="refresh-btn" id="refresh-docs-btn">🔄 Refresh</button>
+                    </div>
+                </div>
+                <div class="document-list" id="document-list">
+                    <div class="empty-state">
+                        <span class="empty-icon">📭</span>
+                        <p>No documents uploaded yet. Upload your first document to get started.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============ LOGS VIEW ============ -->
+        <section class="view" id="view-logs">
+            <div class="view-header">
+                <h1>Application Logs</h1>
+                <p class="view-subtitle">Monitor and analyze system activity</p>
+            </div>
+            <div class="logs-container">
+                <!-- Log Filters -->
+                <div class="log-filters">
+                    <div class="filter-group">
+                        <label for="log-service-filter">Service</label>
+                        <select id="log-service-filter">
+                            <option value="">All Services</option>
+                            <option value="gateway">Gateway</option>
+                            <option value="ingestion">Ingestion</option>
+                            <option value="rag_engine">RAG Engine</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="log-level-filter">Level</label>
+                        <select id="log-level-filter">
+                            <option value="">All Levels</option>
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="log-search">Search</label>
+                        <input type="text" id="log-search" placeholder="Search logs..." maxlength="500">
+                    </div>
+                    <button class="filter-btn" id="log-query-btn">Search Logs</button>
+                </div>
+
+                <!-- Log Table -->
+                <div class="log-table-wrapper">
+                    <table class="log-table" id="log-table">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Service</th>
+                                <th>Level</th>
+                                <th>Message</th>
+                                <th>Request ID</th>
+                            </tr>
+                        </thead>
+                        <tbody id="log-table-body">
+                            <tr class="empty-row">
+                                <td colspan="5">Click "Search Logs" to load log entries</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Grafana Link -->
+                <div class="grafana-link">
+                    <p>For advanced log analysis and dashboards, visit
+                        <a href="http://localhost:3001" target="_blank" rel="noopener noreferrer">Grafana Dashboard</a>
+                    </p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- API Key Modal -->
+    <div class="modal-overlay" id="api-key-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>🔐 API Key Required</h2>
+            </div>
+            <div class="modal-body">
+                <p>Enter your API key to access the chatbot.</p>
+                <div class="input-group">
+                    <input type="password" id="api-key-input" placeholder="Enter your API key" maxlength="256">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="primary-btn" id="api-key-submit">Connect</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/api.js"></script>
+    <script src="/js/chat.js"></script>
+    <script src="/js/documents.js"></script>
+    <script src="/js/logs.js"></script>
+    <script src="/js/app.js"></script>
+</body>
+</html>

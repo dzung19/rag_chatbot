@@ -191,7 +191,7 @@ Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $OneDriveCommand -WorkingD
 
 # Web UI
 Write-Host "-> Launching Web UI on http://localhost:3000" -ForegroundColor Green
-$WebCommand = "title Web UI && `"$PythonExe`" -m http.server 3000 --directory `"$WebDirectory`""
+$WebCommand = "title Web UI && `"$PythonExe`" -m http.server 3000 --bind 0.0.0.0 --directory `"$WebDirectory`""
 Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $WebCommand -WorkingDirectory $WebRuntime
 
 Write-Host "`nService processes were launched." -ForegroundColor Green
