@@ -1,0 +1,29 @@
+.actionBar {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: 0.6rem;
+  opacity: 0.85;
+  transition: opacity var(--transition-fast);
+}
+
+.actionBtn {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 4px 6px;
+  border-radius: var(--radius-xs);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  transition: color var(--transition-fast), background-color var(--transition-fast);
+}
+
+.actionBtn:hover {
+  color: var(--text-primary);
+  background-color: var(--surface-hover);
+}
+
+.actionBtn.active {
+  color: var(--accent-blue);
+  background-color: var(--surface-hover);
+}

@@ -1,0 +1,23 @@
+.shimmer {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: var(--text-base);
+  font-weight: 500;
+  background: linear-gradient(
+    90deg,
+    var(--text-muted) 0%,
+    var(--accent-purple) 50%,
+    var(--text-muted) 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: shimmer 2s linear infinite;
+}
+
+.sparkle {
+  color: var(--accent-purple);
+  animation: pulseGlow 1.5s ease-in-out infinite;
+}

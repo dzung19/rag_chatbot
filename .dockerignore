@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+dist
+**/dist
+__pycache__
+**/*.pyc
+.git
+.gitignore
+.env
+.agents
+.gemini
+*.log
+services/web_ui_legacy

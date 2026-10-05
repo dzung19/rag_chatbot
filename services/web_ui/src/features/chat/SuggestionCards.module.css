@@ -1,0 +1,49 @@
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.875rem;
+  width: 100%;
+  max-width: 820px;
+  margin: 0 auto 2rem;
+  padding: 0 1rem;
+}
+
+.card {
+  background-color: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: 1.125rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 110px;
+  cursor: pointer;
+  transition: transform var(--transition-fast), border-color var(--transition-fast),
+    background-color var(--transition-fast);
+  text-align: left;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  border-color: var(--border-focus);
+  background-color: var(--surface-hover);
+}
+
+.text {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.iconWrapper {
+  display: flex;
+  justify-content: flex-end;
+  color: var(--text-muted);
+  margin-top: 0.75rem;
+  transition: color var(--transition-fast);
+}
+
+.card:hover .iconWrapper {
+  color: var(--accent-blue);
+}

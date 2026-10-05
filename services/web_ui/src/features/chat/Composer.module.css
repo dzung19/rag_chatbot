@@ -1,0 +1,139 @@
+.composerContainer {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 1rem 1.5rem 1.25rem;
+  background: linear-gradient(to top, var(--bg-app) 75%, transparent 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 50;
+  pointer-events: none;
+}
+
+.composerWrapper {
+  pointer-events: auto;
+  width: 100%;
+  max-width: 768px;
+  background-color: var(--surface-composer);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-composer);
+  padding: 0.5rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.composerWrapper:focus-within {
+  border-color: var(--border-focus);
+}
+
+.composerWrapper.dragOver {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 2px rgba(66, 133, 244, 0.25);
+}
+
+.inputRow {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+.attachBtn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  margin-bottom: 2px;
+  transition: background-color var(--transition-fast), color var(--transition-fast);
+}
+
+.attachBtn:hover {
+  background-color: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.textarea {
+  flex: 1;
+  resize: none;
+  max-height: 160px;
+  padding: 0.5rem 0.25rem;
+  border: none;
+  outline: none;
+  font-size: var(--text-base);
+  color: var(--text-primary);
+  line-height: 1.45;
+  background: transparent;
+}
+
+.textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.actionBtn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-bottom: 2px;
+  transition: transform var(--transition-fast), opacity var(--transition-fast);
+}
+
+.sendBtn {
+  background-color: var(--text-primary);
+  color: var(--text-inverted);
+}
+
+.sendBtn:hover:not(:disabled) {
+  opacity: 0.9;
+  transform: scale(1.05);
+}
+
+.sendBtn:disabled {
+  background-color: var(--surface-hover);
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.stopBtn {
+  background-color: var(--badge-red);
+  color: var(--badge-red-text);
+  border: 1px solid var(--badge-red-text);
+}
+
+.stopBtn:hover {
+  background-color: var(--badge-red-text);
+  color: #ffffff;
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 0.4rem;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  width: 100%;
+  max-width: 768px;
+  user-select: none;
+}
+
+.charCount {
+  font-variant-numeric: tabular-nums;
+}
+
+.disclaimer {
+  text-align: center;
+}

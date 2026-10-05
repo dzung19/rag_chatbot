@@ -1,0 +1,37 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 3rem 1.5rem 1.5rem;
+  animation: fadeIn var(--transition-normal) forwards;
+}
+
+.gradientTitle {
+  font-size: var(--text-hero);
+  font-weight: 700;
+  line-height: 1.2;
+  margin-bottom: 0.75rem;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: -0.02em;
+}
+
+.subtitle {
+  font-size: var(--text-md);
+  color: var(--text-secondary);
+  max-width: 520px;
+  line-height: 1.5;
+}
+
+@media (max-width: 600px) {
+  .gradientTitle {
+    font-size: var(--text-2xl);
+  }
+  .subtitle {
+    font-size: var(--text-base);
+  }
+}
