@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     gateway_url: str = Field(default="http://gateway:8000")
 
     # --- CORS ---
-    cors_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000")
+    cors_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000,http://172.26.12.35:3000")
 
     # --- Logging ---
     log_level: str = Field(default="INFO")
