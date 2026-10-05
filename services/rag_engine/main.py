@@ -59,8 +59,9 @@ def _get_retriever() -> Retriever:
     if _retriever is None:
         settings = get_settings()
         _retriever = Retriever(
-            chroma_host=settings.chroma_host,
-            collection_name=settings.chroma_collection,
+            qdrant_url=settings.qdrant_url,
+            qdrant_api_key=settings.qdrant_api_key,
+            collection_name=settings.qdrant_collection,
             ollama_host=settings.ollama_host,
             embed_model=settings.ollama_embed_model,
         )

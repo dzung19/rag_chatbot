@@ -52,29 +52,6 @@ services:
       - rag-network
 
   # -------------------------------------------------------------------------
-  # Vector Database — ChromaDB
-  # -------------------------------------------------------------------------
-  chromadb:
-    image: chromadb/chroma:latest
-    container_name: rag-chromadb
-    volumes:
-      - chroma_data:/chroma/chroma
-    ports:
-      - "8003:8000"
-    environment:
-      - IS_PERSISTENT=TRUE
-      - ANONYMIZED_TELEMETRY=FALSE
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/heartbeat || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    networks:
-      - rag-network
-
-  # -------------------------------------------------------------------------
   # Document Ingestion Service
   # -------------------------------------------------------------------------
   ingestion:
@@ -90,10 +67,9 @@ services:
     env_file: .env
     environment:
       - OLLAMA_HOST=http://ollama:11434
-      - CHROMA_HOST=http://chromadb:8000
+      - QDRANT_URL=${QDRANT_URL:-http://host.docker.internal:6333}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
     depends_on:
-      chromadb:
-        condition: service_healthy
       ollama:
         condition: service_healthy
     restart: unless-stopped
@@ -121,10 +97,9 @@ services:
     env_file: .env
     environment:
       - OLLAMA_HOST=http://ollama:11434
-      - CHROMA_HOST=http://chromadb:8000
+      - QDRANT_URL=${QDRANT_URL:-http://host.docker.internal:6333}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
     depends_on:
-      chromadb:
-        condition: service_healthy
       ollama:
         condition: service_healthy
     restart: unless-stopped
@@ -278,8 +253,6 @@ services:
 # ---------------------------------------------------------------------------
 volumes:
   ollama_data:
-    driver: local
-  chroma_data:
     driver: local
   uploaded_docs:
     driver: local

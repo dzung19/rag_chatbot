@@ -67,9 +67,10 @@ class Settings(BaseSettings):
     ollama_num_threads: int | None = Field(default=None, description="Number of CPU threads for Ollama inference")
     ollama_num_predict: int = Field(default=1024, description="Max output tokens per response")
 
-    # --- ChromaDB ---
-    chroma_host: str = Field(default="http://127.0.0.1:8003")
-    chroma_collection: str = Field(default="rag_documents")
+    # --- Qdrant ---
+    qdrant_url: str = Field(default="http://127.0.0.1:6333")
+    qdrant_api_key: str | None = Field(default=None)
+    qdrant_collection: str = Field(default="rag_documents")
 
     # --- Document Processing ---
     chunk_size: int = Field(default=1000, ge=100, le=5000)

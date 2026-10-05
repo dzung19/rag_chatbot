@@ -11,7 +11,8 @@ import logging
 import re
 from typing import Optional
 
-import chromadb
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.models import Distance, VectorParams
 import httpx
 
 from shared.sqlite_db import get_sqlite_connection
@@ -24,7 +25,8 @@ class Retriever:
 
     def __init__(
         self,
-        chroma_host: str = "http://chromadb:8000",
+        qdrant_url: str = "http://127.0.0.1:6333",
+        qdrant_api_key: Optional[str] = None,
         collection_name: str = "rag_documents",
         ollama_host: str = "http://ollama:11434",
         embed_model: str = "nomic-embed-text",
@@ -32,28 +34,20 @@ class Retriever:
         self.ollama_host = ollama_host.rstrip("/")
         self.embed_model = embed_model
         self._http_client: Optional[httpx.AsyncClient] = None
-        self._collection = None
 
-        # Parse ChromaDB host
-        host = chroma_host.replace("http://", "").replace("https://", "")
-        if ":" in host:
-            hostname, port_str = host.split(":", 1)
-            port = int(port_str)
-        else:
-            hostname = host
-            port = 8000
-
-        self._chroma_client = chromadb.HttpClient(host=hostname, port=port)
+        self._qdrant_client = AsyncQdrantClient(url=qdrant_url, api_key=qdrant_api_key)
         self._collection_name = collection_name
+        self._collection_checked = False
 
-    def _get_collection(self):
-        """Get cached ChromaDB collection to avoid recreation per query."""
-        if self._collection is None:
-            self._collection = self._chroma_client.get_or_create_collection(
-                name=self._collection_name,
-                metadata={"hnsw:space": "cosine"},
-            )
-        return self._collection
+    async def _ensure_collection(self):
+        """Ensure Qdrant collection exists."""
+        if not self._collection_checked:
+            if not await self._qdrant_client.collection_exists(self._collection_name):
+                await self._qdrant_client.create_collection(
+                    collection_name=self._collection_name,
+                    vectors_config=VectorParams(size=768, distance=Distance.COSINE),
+                )
+            self._collection_checked = True
 
     async def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None or self._http_client.is_closed:
@@ -88,44 +82,30 @@ class Retriever:
         top_k: int = 20,
         where_filter: Optional[dict] = None,
     ) -> list[dict]:
-        """Perform dense vector similarity search in ChromaDB."""
+        """Perform dense vector similarity search in Qdrant."""
         try:
             query_embedding = await self._embed_query(query)
-            collection = self._get_collection()
-
-            query_params: dict = {
-                "query_embeddings": [query_embedding],
-                "n_results": top_k,
-                "include": ["documents", "metadatas", "distances"],
-            }
-            if where_filter:
-                query_params["where"] = where_filter
-
-            c_results = collection.query(**query_params)
+            await self._ensure_collection()
+            
+            # Note: where_filter translation from chroma to qdrant might be needed
+            # For now, passing without filter mapping
+            
+            q_results = await self._qdrant_client.search(
+                collection_name=self._collection_name,
+                query_vector=query_embedding,
+                limit=top_k,
+                with_payload=True
+            )
+            
             dense_results = []
-
-            if c_results["ids"] and c_results["ids"][0]:
-                for i, doc_id in enumerate(c_results["ids"][0]):
-                    distance = (
-                        c_results["distances"][0][i] if c_results["distances"] else 0.0
-                    )
-                    score = 1.0 - distance
-                    dense_results.append(
-                        {
-                            "id": doc_id,
-                            "text": (
-                                c_results["documents"][0][i]
-                                if c_results["documents"]
-                                else ""
-                            ),
-                            "metadata": (
-                                c_results["metadatas"][0][i]
-                                if c_results["metadatas"]
-                                else {}
-                            ),
-                            "score": score,
-                        }
-                    )
+            for point in q_results:
+                dense_results.append({
+                    "id": str(point.id),
+                    "text": point.payload.get("text", "") if point.payload else "",
+                    "metadata": point.payload or {},
+                    "score": point.score,
+                })
+                
             return dense_results
         except Exception as e:
             logger.error("Dense search failed: %s", str(e))

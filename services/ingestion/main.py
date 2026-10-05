@@ -55,8 +55,8 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Reconstruct document metadata cache from ChromaDB on startup
-    _reconstruct_documents_from_chroma()
+    # Reconstruct document metadata cache from Qdrant on startup
+    _reconstruct_documents_from_qdrant()
     yield
 
 app = FastAPI(
@@ -140,38 +140,28 @@ def _validate_magic_bytes(content: bytes, extension: str) -> bool:
     return any(content.startswith(magic) for magic in MAGIC_BYTES[extension])
 
 
-def _get_chroma_client():
-    """Get ChromaDB client."""
-    import chromadb
-
+def _get_qdrant_client():
+    """Get Qdrant client."""
+    from qdrant_client import QdrantClient
     settings = get_settings()
-    # Parse host and port from URL
-    host = settings.chroma_host.replace("http://", "").replace("https://", "")
-    if ":" in host:
-        hostname, port_str = host.split(":", 1)
-        port = int(port_str)
-    else:
-        hostname = host
-        port = 8000
-
-    client = chromadb.HttpClient(host=hostname, port=port)
+    client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
     return client
 
+_qdrant_collection_checked = False
 
-_chroma_collection = None
-
-
-def _get_collection():
-    """Get or create the cached ChromaDB collection."""
-    global _chroma_collection
-    if _chroma_collection is None:
-        client = _get_chroma_client()
+def _ensure_collection():
+    """Ensure Qdrant collection exists."""
+    global _qdrant_collection_checked
+    if not _qdrant_collection_checked:
+        client = _get_qdrant_client()
         settings = get_settings()
-        _chroma_collection = client.get_or_create_collection(
-            name=settings.chroma_collection,
-            metadata={"hnsw:space": "cosine"},
-        )
-    return _chroma_collection
+        from qdrant_client.models import Distance, VectorParams
+        if not client.collection_exists(settings.qdrant_collection):
+            client.create_collection(
+                collection_name=settings.qdrant_collection,
+                vectors_config=VectorParams(size=768, distance=Distance.COSINE),
+            )
+        _qdrant_collection_checked = True
 
 
 # ---------------------------------------------------------------------------
@@ -221,34 +211,41 @@ async def _process_document(
         embeddings = await embed_client.embed_batch(chunk_texts)
         logger.info("Generated %d embeddings for document %s", len(embeddings), document_id)
 
-        # 4. Store in ChromaDB with enriched metadata & batching
-        collection = _get_collection()
+        # 4. Store in Qdrant with enriched metadata & batching
+        client = _get_qdrant_client()
+        _ensure_collection()
         ingested_at = datetime.now(timezone.utc).isoformat()
-        ids = [f"{document_id}_chunk_{c['chunk_index']}" for c in chunks]
-        metadatas = [
-            {
-                "document_id": document_id,
-                "filename": original_filename,
-                "source": original_filename,
-                "chunk_index": c["chunk_index"],
-                "total_chunks": len(chunks),
-                "page": c.get("page", 0),
-                "heading": c.get("heading", ""),
-                "file_type": doc_type.value,
-                "ingested_at": ingested_at,
-            }
-            for c in chunks
-        ]
+        
+        from qdrant_client.models import PointStruct
+        
+        points = []
+        for i, c in enumerate(chunks):
+            points.append(
+                PointStruct(
+                    id=str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{document_id}_chunk_{c['chunk_index']}")),
+                    vector=embeddings[i],
+                    payload={
+                        "document_id": document_id,
+                        "filename": original_filename,
+                        "source": original_filename,
+                        "chunk_index": c["chunk_index"],
+                        "total_chunks": len(chunks),
+                        "page": c.get("page", 0),
+                        "heading": c.get("heading", ""),
+                        "file_type": doc_type.value,
+                        "ingested_at": ingested_at,
+                        "text": chunk_texts[i],
+                    }
+                )
+            )
 
-        # Batch upsert to ChromaDB in chunks of 100 to avoid request timeouts
-        chroma_batch_size = 100
-        for i in range(0, len(chunks), chroma_batch_size):
-            b_slice = slice(i, i + chroma_batch_size)
-            collection.upsert(
-                ids=ids[b_slice],
-                embeddings=embeddings[b_slice],
-                documents=chunk_texts[b_slice],
-                metadatas=metadatas[b_slice],
+        # Batch upsert to Qdrant
+        qdrant_batch_size = 100
+        for i in range(0, len(points), qdrant_batch_size):
+            b_slice = slice(i, i + qdrant_batch_size)
+            client.upsert(
+                collection_name=settings.qdrant_collection,
+                points=points[b_slice]
             )
 
         # 4.5. Store in SQLite FTS5 for Hybrid Search
@@ -303,24 +300,38 @@ async def _process_document(
             _documents[document_id].status = IngestionStatusEnum.FAILED
 
 
-def _reconstruct_documents_from_chroma() -> None:
-    """Reconstruct in-memory document metadata from ChromaDB on startup."""
+def _reconstruct_documents_from_qdrant() -> None:
+    """Reconstruct in-memory document metadata from Qdrant on startup."""
     try:
-        collection = _get_collection()
-        # Query ChromaDB for all document metadatas
-        results = collection.get(include=["metadatas"])
-        metadatas = results.get("metadatas", [])
+        client = _get_qdrant_client()
+        settings = get_settings()
+        _ensure_collection()
         
-        # Group by document_id to find unique documents
+        # Qdrant scroll API to fetch all payload points
+        offset = None
         doc_groups = {}
-        for meta in metadatas:
-            if not meta:
-                continue
-            doc_id = meta.get("document_id")
-            filename = meta.get("filename")
-            if doc_id and filename:
-                doc_groups[doc_id] = filename
+        
+        while True:
+            points, offset = client.scroll(
+                collection_name=settings.qdrant_collection,
+                limit=1000,
+                with_payload=True,
+                with_vectors=False,
+                offset=offset,
+            )
+            
+            for point in points[0]:
+                meta = point.payload
+                if not meta or "document_id" not in meta:
+                    continue
+                doc_id = meta["document_id"]
+                filename = meta.get("filename")
+                if doc_id and filename:
+                    doc_groups[doc_id] = filename
                 
+            if offset is None:
+                break
+
         # Reconstruct DocumentInfo for each unique document
         for doc_id, filename in doc_groups.items():
             ext = Path(filename).suffix.lower()
@@ -331,8 +342,24 @@ def _reconstruct_documents_from_chroma() -> None:
                 size_bytes = file_path.stat().st_size
                 created_at = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
                 
-            # Count the number of chunks for this document in the database
-            chunk_count = sum(1 for m in metadatas if m and m.get("document_id") == doc_id)
+            # Note: Count might be hard to calculate precisely without a DB-side aggregation
+            # Let's approximate or leave at 0 if exact count is not necessary.
+            # To be accurate we could issue a count query per doc_id.
+            # But since we just need basic info, let's just create it with chunk_count=0
+            # or do a count request
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            count_result = client.count(
+                collection_name=settings.qdrant_collection,
+                count_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="document_id",
+                            match=MatchValue(value=doc_id)
+                        )
+                    ]
+                )
+            )
+            chunk_count = count_result.count
             doc_type = ALLOWED_EXTENSIONS.get(ext, DocumentType.TXT)
             
             _documents[doc_id] = DocumentInfo(
@@ -352,9 +379,9 @@ def _reconstruct_documents_from_chroma() -> None:
                 total_chunks=chunk_count,
             )
         if doc_groups:
-            logger.info("Successfully reconstructed metadata for %d documents from ChromaDB.", len(doc_groups))
+            logger.info("Successfully reconstructed metadata for %d documents from Qdrant.", len(doc_groups))
     except Exception as e:
-        logger.error("Failed to reconstruct document metadata from ChromaDB: %s", str(e))
+        logger.error("Failed to reconstruct document metadata from Qdrant: %s", str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -459,21 +486,26 @@ async def delete_document(document_id: str):
     if document_id not in _documents:
         raise HTTPException(status_code=404, detail="Document not found.")
 
-    # Remove from ChromaDB
+    # Remove from Qdrant
     try:
-        collection = _get_collection()
-        # Get all chunk IDs for this document
-        results = collection.get(
-            where={"document_id": document_id},
-            include=[],
-        )
-        if results["ids"]:
-            collection.delete(ids=results["ids"])
-            logger.info(
-                "Deleted %d chunks for document %s", len(results["ids"]), document_id
+        client = _get_qdrant_client()
+        settings = get_settings()
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        
+        client.delete(
+            collection_name=settings.qdrant_collection,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="document_id",
+                        match=MatchValue(value=document_id)
+                    )
+                ]
             )
+        )
+        logger.info("Deleted chunks for document %s from Qdrant", document_id)
     except Exception as e:
-        logger.error("Failed to delete from ChromaDB: %s", str(e))
+        logger.error("Failed to delete from Qdrant: %s", str(e))
 
     # Remove from SQLite FTS5
     try:
@@ -501,19 +533,19 @@ async def delete_document(document_id: str):
 @app.get("/ingest/health", response_model=ServiceHealth)
 async def health_check():
     """Health check endpoint."""
-    chroma_ok = False
+    qdrant_ok = False
     try:
-        client = _get_chroma_client()
-        client.heartbeat()
-        chroma_ok = True
+        client = _get_qdrant_client()
+        client.get_collections()
+        qdrant_ok = True
     except Exception:
         pass
 
     return ServiceHealth(
         service="ingestion",
-        status="healthy" if chroma_ok else "degraded",
+        status="healthy" if qdrant_ok else "degraded",
         version="0.1.0",
-        details=f"ChromaDB: {'connected' if chroma_ok else 'unavailable'}",
+        details=f"Qdrant: {'connected' if qdrant_ok else 'unavailable'}",
     )
 
 
