@@ -28,6 +28,7 @@ from shared.security import SecurityHeadersMiddleware
 from retriever import Retriever
 from prompt_builder import build_rag_messages, build_rag_prompt
 from llm_client import OllamaLLMClient
+from shared import skills_repo
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -185,9 +186,29 @@ async def query_sync(
     start_time = time.perf_counter()
 
     try:
+        # 0. Resolve skills
+        main_skill = None
+        if request.skill_id:
+            main_skill = skills_repo.get_skill(request.skill_id)
+            
+        modifier_skills = []
+        for mod_id in request.modifier_skill_ids:
+            mod = skills_repo.get_skill(mod_id)
+            if mod:
+                modifier_skills.append(mod)
+                
+        # Apply overrides
+        top_k = request.top_k
+        temperature = request.temperature
+        if main_skill:
+            if main_skill.top_k_override is not None:
+                top_k = main_skill.top_k_override
+            if main_skill.temperature_override is not None:
+                temperature = main_skill.temperature_override
+
         # 1. Retrieve relevant context via parallel hybrid search
         retriever = _get_retriever()
-        results = await retriever.search(request.query, top_k=request.top_k)
+        results = await retriever.search(request.query, top_k=top_k)
 
         if not results:
             logger.info("No relevant context found for query: %s", request.query[:100])
@@ -196,13 +217,15 @@ async def query_sync(
         messages = build_rag_messages(
             query=request.query,
             context_chunks=results,
+            main_skill=main_skill,
+            modifier_skills=modifier_skills,
         )
 
         # 3. Generate answer via LLM
         llm = _get_llm_client()
         raw_answer = await llm.generate(
             messages=messages,
-            temperature=request.temperature,
+            temperature=temperature,
         )
 
         # Post-process to clean LaTeX math arrows to simple Unicode arrows
@@ -251,9 +274,29 @@ async def query_stream(request: ChatRequest):
 
     async def event_generator():
         try:
+            # 0. Resolve skills
+            main_skill = None
+            if request.skill_id:
+                main_skill = skills_repo.get_skill(request.skill_id)
+                
+            modifier_skills = []
+            for mod_id in request.modifier_skill_ids:
+                mod = skills_repo.get_skill(mod_id)
+                if mod:
+                    modifier_skills.append(mod)
+                    
+            # Apply overrides
+            top_k = request.top_k
+            temperature = request.temperature
+            if main_skill:
+                if main_skill.top_k_override is not None:
+                    top_k = main_skill.top_k_override
+                if main_skill.temperature_override is not None:
+                    temperature = main_skill.temperature_override
+
             # 1. Retrieve context via parallel hybrid search
             retriever = _get_retriever()
-            results = await retriever.search(request.query, top_k=request.top_k)
+            results = await retriever.search(request.query, top_k=top_k)
 
             # Send enriched sources first
             sources = [
@@ -274,13 +317,15 @@ async def query_stream(request: ChatRequest):
             messages = build_rag_messages(
                 query=request.query,
                 context_chunks=results,
+                main_skill=main_skill,
+                modifier_skills=modifier_skills,
             )
 
             # 3. Stream LLM response through the arrow cleaner
             llm = _get_llm_client()
             token_gen = llm.generate_stream(
                 messages=messages,
-                temperature=request.temperature,
+                temperature=temperature,
             )
 
             async for token in _clean_stream_tokens(token_gen):

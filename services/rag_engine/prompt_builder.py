@@ -7,8 +7,9 @@ dynamic context window management.
 
 from __future__ import annotations
 
+from typing import Optional, List
 import logging
-from typing import Optional
+from shared.models import Skill
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,8 @@ def build_rag_messages(
     context_chunks: list[dict],
     system_prompt: str = SYSTEM_PROMPT,
     max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
+    main_skill: Optional[Skill] = None,
+    modifier_skills: Optional[List[Skill]] = None,
 ) -> list[dict]:
     """Build chat messages with system/user role separation for Ollama /api/chat.
 
@@ -103,11 +106,23 @@ def build_rag_messages(
         context_chunks: Retrieved document chunks with metadata.
         system_prompt: System instructions.
         max_context_chars: Context token/char budget.
+        main_skill: Optional Main Skill.
+        modifier_skills: Optional List of Modifier Skills.
 
     Returns:
         List of message dicts: [{"role": "system", ...}, {"role": "user", ...}]
     """
     context_text = build_context_text(context_chunks, max_chars=max_context_chars)
+    
+    # Inject skills into system prompt
+    final_system_prompt = system_prompt
+    if main_skill:
+        final_system_prompt += f"\n\n[MAIN DIRECTIVE - {main_skill.name}]\n{main_skill.system_prompt_addon}"
+        
+    if modifier_skills:
+        final_system_prompt += "\n\n[MODIFIER DIRECTIVES]"
+        for mod in modifier_skills:
+            final_system_prompt += f"\n- {mod.name}: {mod.system_prompt_addon}"
 
     user_content = f"""=== CONTEXT DOCUMENTS ===
 {context_text}
@@ -118,7 +133,7 @@ def build_rag_messages(
 ANSWER:"""
 
     return [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": final_system_prompt},
         {"role": "user", "content": user_content},
     ]
 

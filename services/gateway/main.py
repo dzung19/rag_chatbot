@@ -23,6 +23,11 @@ from shared.models import (
     ChatRequest,
     ChatResponse,
     DocumentListResponse,
+    Skill,
+    SkillCreateRequest,
+    SkillUpdateRequest,
+    SkillListResponse,
+    SkillType,
     HealthResponse,
     LogEntry,
     LogQueryRequest,
@@ -35,6 +40,7 @@ from shared.security import (
     get_current_user,
     detect_prompt_injection,
 )
+from shared import skills_repo
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -146,6 +152,80 @@ async def chat_sync(request: ChatRequest):
         raise HTTPException(status_code=503, detail="RAG engine service unavailable.")
     except Exception as e:
         logger.error("Chat sync error: %s", str(e))
+        raise HTTPException(status_code=500, detail="An error occurred.")
+
+
+# ---------------------------------------------------------------------------
+# Skills Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/skills", response_model=SkillListResponse, dependencies=[Depends(validate_api_key)])
+async def list_skills(type: str = None):
+    """List all skills."""
+    try:
+        skill_type = SkillType(type) if type else None
+        skills = skills_repo.list_skills(skill_type)
+        return SkillListResponse(skills=skills, total=len(skills))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid skill type.")
+    except Exception as e:
+        logger.error("List skills error: %s", str(e))
+        raise HTTPException(status_code=500, detail="An error occurred.")
+
+@app.get("/api/v1/skills/{skill_id}", response_model=Skill, dependencies=[Depends(validate_api_key)])
+async def get_skill(skill_id: str):
+    """Get a skill by ID."""
+    try:
+        skill = skills_repo.get_skill(skill_id)
+        if not skill:
+            raise HTTPException(status_code=404, detail="Skill not found.")
+        return skill
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Get skill error: %s", str(e))
+        raise HTTPException(status_code=500, detail="An error occurred.")
+
+@app.post("/api/v1/skills", response_model=Skill, dependencies=[Depends(validate_api_key)])
+async def create_skill(request: SkillCreateRequest):
+    """Create a new custom skill."""
+    try:
+        return skills_repo.create_skill(request)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Create skill error: %s", str(e))
+        raise HTTPException(status_code=500, detail="An error occurred.")
+
+@app.put("/api/v1/skills/{skill_id}", response_model=Skill, dependencies=[Depends(validate_api_key)])
+async def update_skill(skill_id: str, request: SkillUpdateRequest):
+    """Update a custom skill."""
+    try:
+        return skills_repo.update_skill(skill_id, request)
+    except skills_repo.SkillNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except skills_repo.SkillSystemError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Update skill error: %s", str(e))
+        raise HTTPException(status_code=500, detail="An error occurred.")
+
+@app.delete("/api/v1/skills/{skill_id}", dependencies=[Depends(validate_api_key)])
+async def delete_skill(skill_id: str):
+    """Delete a custom skill."""
+    try:
+        success = skills_repo.delete_skill(skill_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Skill not found.")
+        return {"message": "Skill deleted successfully."}
+    except skills_repo.SkillSystemError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Delete skill error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
 
 

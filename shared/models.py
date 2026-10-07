@@ -11,6 +11,73 @@ from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
+# Skills
+# ---------------------------------------------------------------------------
+
+class SkillType(str, Enum):
+    MAIN = "main"
+    MODIFIER = "modifier"
+
+class SkillCategory(str, Enum):
+    BASE = "base"      # Pre-seeded, immutable
+    CUSTOM = "custom"  # User-designed, editable
+
+class Skill(BaseModel):
+    id: str = Field(..., description="Unique slug ID (e.g., 'executive-summary', 'custom-audit')")
+    name: str = Field(..., min_length=2, max_length=64, description="Display name")
+    description: str = Field(..., max_length=256, description="Short user-facing explanation")
+    type: SkillType = Field(default=SkillType.MAIN, description="'main' or 'modifier'")
+    category: SkillCategory = Field(default=SkillCategory.CUSTOM)
+    is_system: bool = Field(default=False, description="True for built-in base skills (read-only)")
+    
+    # Prompt & Execution controls
+    system_prompt_addon: str = Field(
+        ..., 
+        max_length=4000, 
+        description="Instructions appended to base system prompt"
+    )
+    temperature_override: Optional[float] = Field(
+        default=None, ge=0.0, le=2.0, 
+        description="Optional temperature override for LLM"
+    )
+    top_k_override: Optional[int] = Field(
+        default=None, ge=1, le=20, 
+        description="Optional top_k override for retriever"
+    )
+    
+    # UI Metadata
+    icon: str = Field(default="Sparkles", description="Lucide icon name (e.g., 'FileText', 'ShieldCheck')")
+    
+    # Phase 2 Readiness: Tool calling
+    enabled_tools: list[str] = Field(default_factory=list, description="List of tool names for Phase 2")
+    
+    created_at: str
+    updated_at: str
+
+class SkillCreateRequest(BaseModel):
+    id: Optional[str] = Field(None, max_length=64, description="Optional custom slug, or auto-generated")
+    name: str = Field(..., min_length=2, max_length=64)
+    description: str = Field(..., max_length=256)
+    type: SkillType = Field(default=SkillType.MAIN)
+    system_prompt_addon: str = Field(..., min_length=10, max_length=4000)
+    temperature_override: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    top_k_override: Optional[int] = Field(default=None, ge=1, le=20)
+    icon: Optional[str] = Field(default="Sparkles")
+
+class SkillUpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=2, max_length=64)
+    description: Optional[str] = Field(None, max_length=256)
+    system_prompt_addon: Optional[str] = Field(None, min_length=10, max_length=4000)
+    temperature_override: Optional[float] = Field(None, ge=0.0, le=2.0)
+    top_k_override: Optional[int] = Field(None, ge=1, le=20)
+    icon: Optional[str] = None
+
+class SkillListResponse(BaseModel):
+    skills: list[Skill]
+    total: int
+
+
+# ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 
@@ -40,6 +107,16 @@ class ChatRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20, description="Number of context chunks to retrieve")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="LLM temperature")
     stream: bool = Field(default=True, description="Whether to stream the response via SSE")
+    
+    # Skill selection
+    skill_id: Optional[str] = Field(
+        default="general-assistant",
+        description="ID of active main skill"
+    )
+    modifier_skill_ids: list[str] = Field(
+        default_factory=list,
+        description="List of active modifier skill IDs"
+    )
 
 
 class SourceDocument(BaseModel):
