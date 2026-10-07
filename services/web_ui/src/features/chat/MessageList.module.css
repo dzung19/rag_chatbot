@@ -19,7 +19,7 @@
 .scrollBottomBtn {
   position: fixed;
   bottom: 95px;
-  left: 50%;
+  left: 55%;
   transform: translateX(-50%);
   width: 36px;
   height: 36px;

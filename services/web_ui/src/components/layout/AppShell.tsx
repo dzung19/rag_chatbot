@@ -2,7 +2,6 @@ import React, { useEffect } from "react";
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { MobileDrawer } from "./MobileDrawer";
-import { ApiKeyModal } from "../../features/auth/ApiKeyModal";
 import { ToastContainer } from "../ui/ToastContainer";
 import { useHealthStore } from "../../stores/healthStore";
 import { useUiStore } from "../../stores/uiStore";
@@ -35,7 +34,6 @@ export const AppShell: React.FC<AppShellProps> = ({ children }) => {
         <main className={styles.content}>{children}</main>
       </div>
       <MobileDrawer />
-      <ApiKeyModal />
       <ToastContainer />
     </div>
   );

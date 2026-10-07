@@ -1,48 +1,64 @@
 import { create } from "zustand";
-import { persist, createJSONStorage } from "zustand/middleware";
-import { setApiKey as setClientApiKey, setUnauthorizedHandler } from "../api/client";
+import { createJSONStorage, persist } from "zustand/middleware";
 
-interface AuthState {
-  apiKey: string;
-  isKeyModalOpen: boolean;
-  setApiKey: (key: string) => void;
-  openKeyModal: () => void;
-  closeKeyModal: () => void;
+import type { AuthUser } from "../types/authTypes";
+
+type AuthState = {
+  user: AuthUser | null;
+  isAuthenticated: boolean;
+  isHydrated: boolean;
+  loginForDevelopment: () => void;
   logout: () => void;
-}
+  setHydrated: (value: boolean) => void;
+};
+
+const developmentUser: AuthUser = {
+  id: "local-dev-user",
+  name: "Development User",
+  email: "dev.user@local.test",
+};
 
 export const useAuthStore = create<AuthState>()(
   persist(
     (set) => ({
-      apiKey: "",
-      isKeyModalOpen: false,
-      setApiKey: (key: string) => {
-        const trimmed = key.trim();
-        setClientApiKey(trimmed);
-        set({ apiKey: trimmed, isKeyModalOpen: false });
+      user: null,
+      isAuthenticated: false,
+      isHydrated: false,
+
+      loginForDevelopment: () => {
+        if (!import.meta.env.DEV) {
+          throw new Error(
+            "Development login is disabled outside Vite development mode.",
+          );
+        }
+
+        set({
+          user: developmentUser,
+          isAuthenticated: true,
+        });
       },
-      openKeyModal: () => set({ isKeyModalOpen: true }),
-      closeKeyModal: () => set({ isKeyModalOpen: false }),
+
       logout: () => {
-        setClientApiKey("");
-        set({ apiKey: "", isKeyModalOpen: true });
+        set({
+          user: null,
+          isAuthenticated: false,
+        });
+      },
+
+      setHydrated: (value) => {
+        set({ isHydrated: value });
       },
     }),
     {
-      name: "rag_auth",
+      name: "rag-chatbot-dev-auth",
       storage: createJSONStorage(() => sessionStorage),
+      partialize: (state) => ({
+        user: state.user,
+        isAuthenticated: state.isAuthenticated,
+      }),
       onRehydrateStorage: () => (state) => {
-        if (state?.apiKey) {
-          setClientApiKey(state.apiKey);
-        } else {
-          state?.openKeyModal();
-        }
+        state?.setHydrated(true);
       },
-    }
-  )
+    },
+  ),
 );
-
-// Connect 401/403 callback to auto-open key modal
-setUnauthorizedHandler(() => {
-  useAuthStore.getState().logout();
-});

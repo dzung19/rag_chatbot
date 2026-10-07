@@ -1,0 +1,69 @@
+.badge {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 1000;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  max-width: min(360px, calc(100vw - 36px));
+  padding: 10px 10px 10px 12px;
+  color: #0f172a;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: rgb(255 255 255 / 94%);
+  box-shadow: 0 12px 32px rgb(15 23 42 / 16%);
+  backdrop-filter: blur(12px);
+}
+
+.badge > svg {
+  color: #2563eb;
+}
+
+.userText {
+  min-width: 0;
+  text-align: left;
+}
+
+.userText strong,
+.userText span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.userText strong {
+  font-size: 13px;
+}
+
+.userText span {
+  margin-top: 2px;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.logoutButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: #475569;
+  border: 0;
+  border-radius: 9px;
+  background: #f1f5f9;
+  cursor: pointer;
+}
+
+.logoutButton:hover {
+  color: #b91c1c;
+  background: #fee2e2;
+}
+
+.logoutButton:focus-visible {
+  outline: 3px solid rgb(37 99 235 / 20%);
+  outline-offset: 2px;
+}

@@ -35,11 +35,6 @@ export const TopBar: React.FC = () => {
       </div>
 
       <div className={styles.rightSection}>
-        <div className={styles.modelChip} title={`Inference Engine: ${modelName}`}>
-          <Cpu size={14} color="var(--accent-blue)" />
-          <span>{modelName}</span>
-        </div>
-
         <button
           className={styles.themeBtn}
           onClick={toggleTheme}

@@ -6,16 +6,19 @@ import {
   Sun,
   Moon,
   Monitor,
+  LogOut,
+  UserRound,
 } from "lucide-react";
 import { useUiStore } from "../../stores/uiStore";
-import { useAuthStore } from "../../stores/authStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useToastStore } from "../../stores/toastStore";
 import styles from "./SettingsView.module.css";
+import { useAuthStore } from "../../stores/authStore";
 
 export const SettingsView: React.FC = () => {
+  const user = useAuthStore((state) => state.user);
+  const logout = useAuthStore((state) => state.logout);
   const { theme, setTheme, userName, setUserName } = useUiStore();
-  const { apiKey, openKeyModal, logout } = useAuthStore();
   const { clearAll, conversations } = useChatStore();
   const { pushToast } = useToastStore();
 
@@ -40,17 +43,6 @@ export const SettingsView: React.FC = () => {
       pushToast("All chat history cleared", "info");
     }
   };
-
-  const handleDisconnect = () => {
-    if (window.confirm("Disconnect API key? You will need to enter it again to query.")) {
-      logout();
-      pushToast("Disconnected", "info");
-    }
-  };
-
-  const maskedKey = apiKey
-    ? apiKey.slice(0, 4) + "••••••••••••" + apiKey.slice(-4)
-    : "Not configured";
 
   return (
     <div className={styles.container}>
@@ -134,37 +126,6 @@ export const SettingsView: React.FC = () => {
       </div>
 
       {/* Authentication Section */}
-      <div className={styles.section}>
-        <div className={styles.sectionTitle}>
-          <KeyRound size={18} />
-          <span>API Authentication</span>
-        </div>
-
-        <div className={styles.row}>
-          <div className={styles.labelGroup}>
-            <span className={styles.label}>Current API Key</span>
-            <span className={styles.description}>{maskedKey}</span>
-          </div>
-
-          <div style={{ display: "flex", gap: "0.5rem" }}>
-            <button
-              className={`${styles.btn} ${styles.primaryBtn}`}
-              onClick={openKeyModal}
-            >
-              Update Key
-            </button>
-
-            {apiKey && (
-              <button
-                className={`${styles.btn} ${styles.dangerBtn}`}
-                onClick={handleDisconnect}
-              >
-                Disconnect
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
 
       {/* Data & Privacy Section */}
       <div className={styles.section}>
@@ -187,6 +148,35 @@ export const SettingsView: React.FC = () => {
             disabled={Object.keys(conversations).length === 0}
           >
             Clear All History
+          </button>
+        </div>
+      </div>
+
+      <div className={styles.section}>
+        <div className={styles.sectionTitle}>
+          <KeyRound size={18} />
+          <span>Authentication</span>
+        </div>
+
+
+        <div className={styles.row}>
+
+          <div className={styles.userGroup}>
+            <UserRound size={20} aria-hidden="true" />
+            <div className={styles.userText}>
+              <strong>{user ? user.name : ""}</strong>
+              <span>{user?.email}</span>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            className={styles.logoutButton}
+            aria-label="Sign out"
+            title="Sign out"
+            onClick={logout}
+          >
+            <LogOut size={18} aria-hidden="true" />
           </button>
         </div>
       </div>

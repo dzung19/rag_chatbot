@@ -13,7 +13,7 @@ interface HealthState {
 
 export const useHealthStore = create<HealthState>()((set) => ({
   status: "checking",
-  modelName: "Gemma 4 E4B",
+  modelName: "Unknown",
   lastChecked: null,
 
   checkHealth: async () => {

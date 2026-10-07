@@ -139,3 +139,57 @@
   background-color: var(--badge-red-text);
   color: #ffffff;
 }
+
+.userText {
+  min-width: 0;
+  text-align: left;
+}
+
+.userText strong,
+.userText span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.userText strong {
+  font-size: 13px;
+}
+
+.userText span {
+  margin-top: 2px;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.userGroup {
+  display: flex;
+  align-items: center;
+  flex-direction: row;
+  gap: 0.5rem;
+}
+
+.logoutButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: #475569;
+  border: 0;
+  border-radius: 9px;
+  background: #f1f5f9;
+  cursor: pointer;
+}
+
+.logoutButton:hover {
+  color: #b91c1c;
+  background: #fee2e2;
+}
+
+.logoutButton:focus-visible {
+  outline: 3px solid rgb(37 99 235 / 20%);
+  outline-offset: 2px;
+}
