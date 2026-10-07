@@ -185,16 +185,6 @@ export const Sidebar: React.FC = () => {
           {!sidebarCollapsed && <span>Settings</span>}
         </NavLink>
 
-        <button
-          className={styles.navItem}
-          onClick={openKeyModal}
-          title="Change API Key"
-          style={{ width: "100%", justifyContent: sidebarCollapsed ? "center" : "flex-start" }}
-        >
-          <KeyRound size={18} />
-          {!sidebarCollapsed && <span>API Key</span>}
-        </button>
-
         {/* Status Indicator */}
         <div
           className={styles.statusRow}

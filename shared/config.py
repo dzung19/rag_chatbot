@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     sqlite_db_path: str = Field(default="/app/shared_data/rag_hybrid.db")
 
     # --- Downstream Service URLs ---
-    ingestion_service_url: str = Field(default="http://ingestion:8001")
+    ingestion_service_url: str = Field(default="http://localhost:8001")
     rag_engine_service_url: str = Field(default="http://rag-engine:8002")
     onedrive_connector_url: str = Field(default="http://onedrive-connector:8004")
     gateway_url: str = Field(default="http://gateway:8000")

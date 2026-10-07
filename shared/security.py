@@ -26,6 +26,20 @@ logger = logging.getLogger(__name__)
 # API Key Authentication
 # ---------------------------------------------------------------------------
 
+from dataclasses import dataclass
+
+
+
+@dataclass(frozen=True)
+class CurrentUser:
+    user_id: str
+
+
+def get_current_user() -> CurrentUser:
+    return CurrentUser(
+        user_id="local-dev-user",
+    )
+
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 

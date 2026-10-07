@@ -28,6 +28,7 @@ $RagRuntime = Join-Path $RuntimeRoot "rag"
 $GatewayRuntime = Join-Path $RuntimeRoot "gateway"
 $OneDriveRuntime = Join-Path $RuntimeRoot "onedrive"
 $WebRuntime = Join-Path $RuntimeRoot "web"
+$ConversationRuntime = Join-Path $RuntimeRoot "conversation"
 
 $RuntimeDirectories = @(
     $ChromaRuntime,
@@ -36,6 +37,7 @@ $RuntimeDirectories = @(
     $GatewayRuntime,
     $OneDriveRuntime,
     $WebRuntime
+    $ConversationRuntime
 )
 
 foreach ($Directory in $RuntimeDirectories) {
@@ -90,7 +92,7 @@ Get-Content $EnvFile | ForEach-Object {
 
 # Stop existing processes on target ports.
 Write-Host "Checking and stopping existing services on ports 8000, 8001, 8002, 8003, 8004, 3000..." -ForegroundColor Cyan
-$Ports = @(8000, 8001, 8002, 8003, 8004, 3000)
+$Ports = @(8000, 8001, 8002, 8003, 8004, 8005, 3000)
 
 foreach ($Port in $Ports) {
     $Connections = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
@@ -189,12 +191,34 @@ Write-Host "-> Launching OneDrive Connector on http://127.0.0.1:8004" -Foregroun
 $OneDriveCommand = "title OneDrive Connector && set `"PYTHONPATH=$ProjectRoot`" && `"$PythonExe`" `"$OneDriveMain`""
 Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $OneDriveCommand -WorkingDirectory $OneDriveRuntime
 
-# Web UI
-Write-Host "-> Launching Web UI on http://localhost:3000" -ForegroundColor Green
-$WebCommand = "title Web UI && `"$PythonExe`" -m http.server 3000 --bind 0.0.0.0 --directory `"$WebDirectory`""
-Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $WebCommand -WorkingDirectory $WebRuntime
+# Web UI: React + TypeScript + Vite
+$WebDirectory = Join-Path $ProjectRoot "services\web_ui"
+
+if (-not (Test-Path (Join-Path $WebDirectory "package.json"))) {
+    throw "Không tìm thấy project Vite tại: $WebDirectory"
+}
+
+Write-Host "-> Launching React Web UI on port 3000" -ForegroundColor Green
+$WebCommand = "title Web UI && npm.cmd run dev -- --host 0.0.0.0 --port 3000"
+Start-Process `
+    -FilePath "cmd.exe" `
+    -ArgumentList "/k", $WebCommand `
+    -WorkingDirectory $WebDirectory
 
 Write-Host "`nService processes were launched." -ForegroundColor Green
 Write-Host "Open http://localhost:3000 in your browser." -ForegroundColor Green
 Write-Host "API Gateway: http://127.0.0.1:8000" -ForegroundColor Green
 Write-Host "To stop services, close their Command Prompt windows or rerun this script." -ForegroundColor Yellow
+
+Write-Host `
+    "Applying conversation database migrations..." `
+    -ForegroundColor Cyan
+
+& "$ProjectRoot\venv\Scripts\alembic.exe" `
+    -c "$ProjectRoot\alembic.ini" `
+    upgrade head
+
+if ($LASTEXITCODE -ne 0) {
+    throw (
+        "Conversation database " + "migration failed.")
+}

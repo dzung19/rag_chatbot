@@ -32,7 +32,7 @@ from shared.models import (
 from shared.security import (
     RateLimitMiddleware,
     SecurityHeadersMiddleware,
-    validate_api_key,
+    get_current_user,
     detect_prompt_injection,
 )
 
@@ -89,7 +89,7 @@ async def _get_client() -> httpx.AsyncClient:
 # Chat Endpoints
 # ---------------------------------------------------------------------------
 
-@app.post("/api/v1/chat", dependencies=[Depends(validate_api_key)])
+@app.post("/api/v1/chat", dependencies=[Depends(get_current_user)])
 async def chat_stream(request: ChatRequest):
     """Streaming chat endpoint — proxies to RAG engine via SSE."""
     if detect_prompt_injection(request.query):
@@ -126,7 +126,7 @@ async def chat_stream(request: ChatRequest):
         raise HTTPException(status_code=500, detail="An error occurred.")
 
 
-@app.post("/api/v1/chat/sync", response_model=ChatResponse, dependencies=[Depends(validate_api_key)])
+@app.post("/api/v1/chat/sync", response_model=ChatResponse, dependencies=[Depends(get_current_user)])
 async def chat_sync(request: ChatRequest):
     """Non-streaming chat endpoint."""
     if detect_prompt_injection(request.query):
@@ -153,7 +153,7 @@ async def chat_sync(request: ChatRequest):
 # Document Endpoints
 # ---------------------------------------------------------------------------
 
-@app.post("/api/v1/documents/upload", dependencies=[Depends(validate_api_key)])
+@app.post("/api/v1/documents/upload", dependencies=[Depends(get_current_user)])
 async def upload_document(file: UploadFile = File(...)):
     """Upload a document for ingestion."""
     settings = get_settings()
@@ -183,7 +183,7 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail="An error occurred.")
 
 
-@app.get("/api/v1/documents", response_model=DocumentListResponse, dependencies=[Depends(validate_api_key)])
+@app.get("/api/v1/documents", response_model=DocumentListResponse, dependencies=[Depends(get_current_user)])
 async def list_documents():
     """List all indexed documents."""
     settings = get_settings()
@@ -200,7 +200,7 @@ async def list_documents():
         raise HTTPException(status_code=500, detail="An error occurred.")
 
 
-@app.delete("/api/v1/documents/{document_id}", dependencies=[Depends(validate_api_key)])
+@app.delete("/api/v1/documents/{document_id}", dependencies=[Depends(get_current_user)])
 async def delete_document(document_id: str):
     """Delete a document and its embeddings."""
     settings = get_settings()
@@ -229,7 +229,7 @@ async def delete_document(document_id: str):
 # OneDrive/SharePoint Endpoints (Phase 2)
 # ---------------------------------------------------------------------------
 
-@app.post("/api/v1/onedrive/sync", dependencies=[Depends(validate_api_key)])
+@app.post("/api/v1/onedrive/sync", dependencies=[Depends(get_current_user)])
 async def trigger_onedrive_sync():
     """Trigger a manual sync from OneDrive/SharePoint."""
     settings = get_settings()
@@ -251,7 +251,7 @@ async def trigger_onedrive_sync():
         logger.error("Sync trigger error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
 
-@app.get("/api/v1/onedrive/status", dependencies=[Depends(validate_api_key)])
+@app.get("/api/v1/onedrive/status", dependencies=[Depends(get_current_user)])
 async def onedrive_sync_status():
     """Get the status of the last sync operation."""
     settings = get_settings()
@@ -267,7 +267,7 @@ async def onedrive_sync_status():
         logger.error("Sync status error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
 
-@app.get("/api/v1/onedrive/auth-url", dependencies=[Depends(validate_api_key)])
+@app.get("/api/v1/onedrive/auth-url", dependencies=[Depends(get_current_user)])
 async def onedrive_auth_url():
     """Get the Microsoft login URL."""
     settings = get_settings()
@@ -316,7 +316,7 @@ async def onedrive_callback(request: Request):
 # Logs Endpoint (proxies to Loki)
 # ---------------------------------------------------------------------------
 
-@app.post("/api/v1/logs", response_model=LogQueryResponse, dependencies=[Depends(validate_api_key)])
+@app.post("/api/v1/logs", response_model=LogQueryResponse, dependencies=[Depends(get_current_user)])
 async def query_logs(request: LogQueryRequest):
     """Query application logs via Loki."""
     settings = get_settings()
