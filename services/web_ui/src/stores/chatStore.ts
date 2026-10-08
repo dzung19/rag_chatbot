@@ -13,6 +13,7 @@ import {
 import { ApiError } from "../api/client";
 import { titleFromQuery } from "../lib/titleFromQuery";
 import { useToastStore } from "./toastStore";
+import { useSkillStore } from "./skillStore";
 
 interface ChatState {
   conversations: Record<string, Conversation>;
@@ -398,6 +399,7 @@ export const useChatStore = create<ChatState>()(
         let sources: Source[] = [];
 
         try {
+          const { activeMainSkillId, activeModifierSkillIds } = useSkillStore.getState();
           const stream = streamChat(
             {
               query: trimmedQuery,
@@ -405,6 +407,8 @@ export const useChatStore = create<ChatState>()(
               temperature: 0.7,
               stream: true,
               conversation_id: activeId,
+              skill_id: activeMainSkillId,
+              modifier_skill_ids: activeModifierSkillIds,
             },
             activeAbortController.signal
           );

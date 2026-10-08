@@ -88,3 +88,24 @@ export interface ApiConversationDetail extends ApiConversationSummary {
 export interface SharePointAuthUrlResponse {
   url?: string;
 }
+
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  type: "main" | "modifier";
+  category: "base" | "custom";
+  is_system: boolean;
+  system_prompt_addon: string;
+  temperature_override?: number;
+  top_k_override?: number;
+  icon: string;
+  enabled_tools: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SkillListResponse {
+  skills: Skill[];
+  total: number;
+}

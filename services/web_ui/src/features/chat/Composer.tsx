@@ -3,6 +3,7 @@ import { Plus, ArrowUp, Square } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore";
 import { useToastStore } from "../../stores/toastStore";
 import { AttachmentChips } from "./AttachmentChips";
+import { SkillSelector } from "./SkillSelector";
 import { validateChatFile } from "../../lib/fileValidation";
 import { MAX_INPUT_CHARS, MAX_CHAT_FILES } from "../../lib/constants";
 import styles from "./Composer.module.css";
@@ -100,6 +101,8 @@ export const Composer: React.FC = () => {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
+        <SkillSelector />
+        
         <AttachmentChips files={attachedFiles} onRemove={handleRemoveFile} />
 
         <div className={styles.inputRow}>
