@@ -57,7 +57,7 @@ export const MessageActions: React.FC<MessageActionsProps> = ({
         title="Regenerate response"
         aria-label="Regenerate response"
       >
-        <RefreshCw size={14} className={isStreaming ? "animate-spin" : ""} />
+        <RefreshCw size={14} />
       </button>
 
       <button

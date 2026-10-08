@@ -22,7 +22,7 @@ services:
         limits:
           memory: 16G
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      test: ["CMD-SHELL", "ollama list || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -113,6 +113,32 @@ services:
       - rag-network
 
   # -------------------------------------------------------------------------
+  # Conversation History Service (Chat History SQLite + SQLAlchemy)
+  # -------------------------------------------------------------------------
+  conversation:
+    build:
+      context: .
+      dockerfile: services/conversation_service/Dockerfile
+    container_name: rag-conversation
+    ports:
+      - "8005:8005"
+    volumes:
+      - shared_data:/app/shared_data
+    env_file: .env
+    environment:
+      - CONVERSATION_DATABASE_URL=sqlite:////app/shared_data/chat_history.db
+      - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-rag-internal-key}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8005/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - rag-network
+
+  # -------------------------------------------------------------------------
   # API Gateway
   # -------------------------------------------------------------------------
   gateway:
@@ -126,6 +152,8 @@ services:
     environment:
       - INGESTION_SERVICE_URL=http://ingestion:8001
       - RAG_ENGINE_SERVICE_URL=http://rag-engine:8002
+      - CONVERSATION_SERVICE_URL=http://conversation:8005
+      - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-rag-internal-key}
       - ONEDRIVE_CONNECTOR_URL=http://onedrive-connector:8004
       - LOKI_URL=http://loki:3100
     depends_on:

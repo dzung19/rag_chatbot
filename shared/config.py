@@ -81,8 +81,10 @@ class Settings(BaseSettings):
     # --- Downstream Service URLs ---
     ingestion_service_url: str = Field(default="http://localhost:8001")
     rag_engine_service_url: str = Field(default="http://rag-engine:8002")
+    conversation_service_url: str = Field(default="http://conversation:8005")
     onedrive_connector_url: str = Field(default="http://onedrive-connector:8004")
     gateway_url: str = Field(default="http://gateway:8000")
+    internal_service_key: str | None = Field(default=None)
 
     # --- CORS ---
     cors_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000,http://172.26.12.35:3000")

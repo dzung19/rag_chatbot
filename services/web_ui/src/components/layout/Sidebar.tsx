@@ -10,12 +10,10 @@ import {
   EllipsisVertical,
   Pencil,
   Trash2,
-  KeyRound,
 } from "lucide-react";
 import { useUiStore } from "../../stores/uiStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useHealthStore } from "../../stores/healthStore";
-import { useAuthStore } from "../../stores/authStore";
 import styles from "./Sidebar.module.css";
 
 export const Sidebar: React.FC = () => {
@@ -24,7 +22,6 @@ export const Sidebar: React.FC = () => {
   const { conversations, order, activeId, newConversation, deleteConversation, renameConversation } =
     useChatStore();
   const { status, modelName } = useHealthStore();
-  const { openKeyModal } = useAuthStore();
 
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
 

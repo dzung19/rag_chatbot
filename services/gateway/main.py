@@ -159,7 +159,7 @@ async def chat_sync(request: ChatRequest):
 # Skills Endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/api/v1/skills", response_model=SkillListResponse, dependencies=[Depends(validate_api_key)])
+@app.get("/api/v1/skills", response_model=SkillListResponse, dependencies=[Depends(get_current_user)])
 async def list_skills(type: str = None):
     """List all skills."""
     try:
@@ -172,7 +172,7 @@ async def list_skills(type: str = None):
         logger.error("List skills error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
 
-@app.get("/api/v1/skills/{skill_id}", response_model=Skill, dependencies=[Depends(validate_api_key)])
+@app.get("/api/v1/skills/{skill_id}", response_model=Skill, dependencies=[Depends(get_current_user)])
 async def get_skill(skill_id: str):
     """Get a skill by ID."""
     try:
@@ -186,7 +186,7 @@ async def get_skill(skill_id: str):
         logger.error("Get skill error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
 
-@app.post("/api/v1/skills", response_model=Skill, dependencies=[Depends(validate_api_key)])
+@app.post("/api/v1/skills", response_model=Skill, dependencies=[Depends(get_current_user)])
 async def create_skill(request: SkillCreateRequest):
     """Create a new custom skill."""
     try:
@@ -197,7 +197,7 @@ async def create_skill(request: SkillCreateRequest):
         logger.error("Create skill error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
 
-@app.put("/api/v1/skills/{skill_id}", response_model=Skill, dependencies=[Depends(validate_api_key)])
+@app.put("/api/v1/skills/{skill_id}", response_model=Skill, dependencies=[Depends(get_current_user)])
 async def update_skill(skill_id: str, request: SkillUpdateRequest):
     """Update a custom skill."""
     try:
@@ -212,7 +212,7 @@ async def update_skill(skill_id: str, request: SkillUpdateRequest):
         logger.error("Update skill error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
 
-@app.delete("/api/v1/skills/{skill_id}", dependencies=[Depends(validate_api_key)])
+@app.delete("/api/v1/skills/{skill_id}", dependencies=[Depends(get_current_user)])
 async def delete_skill(skill_id: str):
     """Delete a custom skill."""
     try:

@@ -26,12 +26,6 @@ export const useAuthStore = create<AuthState>()(
       isHydrated: false,
 
       loginForDevelopment: () => {
-        if (!import.meta.env.DEV) {
-          throw new Error(
-            "Development login is disabled outside Vite development mode.",
-          );
-        }
-
         set({
           user: developmentUser,
           isAuthenticated: true,

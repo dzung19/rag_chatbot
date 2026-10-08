@@ -18,7 +18,9 @@ from sqlalchemy.orm import (
 
 DATABASE_URL = os.getenv(
     "CONVERSATION_DATABASE_URL",
-    "sqlite:///D:/rag_chatbot/data/chat_history.db",
+    "sqlite:////app/shared_data/chat_history.db"
+    if os.path.exists("/app")
+    else "sqlite:///D:/rag_chatbot/data/chat_history.db",
 )
 
 
@@ -47,6 +49,12 @@ def create_database_engine() -> Engine:
     is_sqlite = DATABASE_URL.startswith(
         "sqlite"
     )
+
+    if is_sqlite and ":///" in DATABASE_URL:
+        db_path = DATABASE_URL.split(":///", 1)[1]
+        db_dir = os.path.dirname(db_path)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
 
     engine_options: dict = {
         "pool_pre_ping": True,

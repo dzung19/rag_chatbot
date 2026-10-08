@@ -1,13 +1,11 @@
 import React from "react";
-import { Menu, Cpu, Sun, Moon, Sparkles } from "lucide-react";
+import { Menu, Sun, Moon, Sparkles } from "lucide-react";
 import { useUiStore } from "../../stores/uiStore";
-import { useHealthStore } from "../../stores/healthStore";
 import { useChatStore } from "../../stores/chatStore";
 import styles from "./TopBar.module.css";
 
 export const TopBar: React.FC = () => {
   const { theme, setTheme, setMobileDrawerOpen } = useUiStore();
-  const { modelName } = useHealthStore();
   const { activeId, conversations } = useChatStore();
 
   const activeConv = activeId ? conversations[activeId] : null;
