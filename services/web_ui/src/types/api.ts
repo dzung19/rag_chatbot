@@ -55,6 +55,34 @@ export interface ChatQueryParams {
   top_k?: number;
   temperature?: number;
   stream?: boolean;
+  conversation_id?: string;
+  skill_id?: string;
+  modifier_skill_ids?: string[];
+}
+
+export interface ApiConversationSummary {
+  id: string;
+  title: string;
+  pinned: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiStoredMessage {
+  id: string;
+  conversation_id: string;
+  turn_id: string;
+  sequence: number;
+  role: "user" | "assistant";
+  content: string;
+  status: string;
+  sources_json: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiConversationDetail extends ApiConversationSummary {
+  messages: ApiStoredMessage[];
 }
 
 export interface SharePointAuthUrlResponse {

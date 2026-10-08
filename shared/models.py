@@ -108,6 +108,11 @@ class ChatRequest(BaseModel):
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="LLM temperature")
     stream: bool = Field(default=True, description="Whether to stream the response via SSE")
     
+    conversation_id: Optional[str] = Field(
+        default=None,
+        description="Optional active conversation ID"
+    )
+    
     # Skill selection
     skill_id: Optional[str] = Field(
         default="general-assistant",

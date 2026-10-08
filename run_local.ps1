@@ -1,4 +1,4 @@
-﻿# =============================================================================
+# =============================================================================
 # RAG Chatbot - Local Non-Docker Startup Script (Windows PowerShell)
 # =============================================================================
 
@@ -128,7 +128,8 @@ if (-not $SkipDependencyInstall) {
         -r (Join-Path $ProjectRoot "services\gateway\requirements.txt") `
         -r (Join-Path $ProjectRoot "services\ingestion\requirements.txt") `
         -r (Join-Path $ProjectRoot "services\rag_engine\requirements.txt") `
-        -r (Join-Path $ProjectRoot "services\onedrive_connector\requirements.txt")
+        -r (Join-Path $ProjectRoot "services\onedrive_connector\requirements.txt") `
+        -r (Join-Path $ProjectRoot "services\conversation_service\requirements.txt")
 
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to install service dependencies."
@@ -158,13 +159,16 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Starting all microservices in separate Command Prompt windows..." -ForegroundColor Green
 
 $ChromaData = Join-Path $ProjectRoot "chroma_data"
+$SharedData = Join-Path $ProjectRoot "shared_data"
 $IngestionMain = Join-Path $ProjectRoot "services\ingestion\main.py"
 $RagMain = Join-Path $ProjectRoot "services\rag_engine\main.py"
+$ConversationMain = Join-Path $ProjectRoot "services\conversation_service\main.py"
 $GatewayMain = Join-Path $ProjectRoot "services\gateway\main.py"
 $OneDriveMain = Join-Path $ProjectRoot "services\onedrive_connector\main.py"
 $WebDirectory = Join-Path $ProjectRoot "services\web_ui"
 
 New-Item -ItemType Directory -Path $ChromaData -Force | Out-Null
+New-Item -ItemType Directory -Path $SharedData -Force | Out-Null
 
 # ChromaDB
 Write-Host "-> Launching ChromaDB on http://127.0.0.1:8003" -ForegroundColor Green
@@ -180,6 +184,11 @@ Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $IngestionCommand -Working
 Write-Host "-> Launching RAG Query Engine on http://127.0.0.1:8002" -ForegroundColor Green
 $RagCommand = "title RAG Engine && set `"PYTHONPATH=$ProjectRoot`" && `"$PythonExe`" `"$RagMain`""
 Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $RagCommand -WorkingDirectory $RagRuntime
+
+# Conversation Service
+Write-Host "-> Launching Conversation Service on http://127.0.0.1:8005" -ForegroundColor Green
+$ConversationCommand = "title Conversation Service && set `"PYTHONPATH=$ProjectRoot`" && `"$PythonExe`" `"$ConversationMain`""
+Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $ConversationCommand -WorkingDirectory $ConversationRuntime
 
 # Gateway
 Write-Host "-> Launching API Gateway on http://127.0.0.1:8000" -ForegroundColor Green

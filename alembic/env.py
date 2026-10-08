@@ -40,12 +40,22 @@ if config.config_file_name:
     )
 
 
-DATABASE_URL = os.getenv(
-    "CONVERSATION_DATABASE_URL",
-    "sqlite:////app/shared_data/chat_history.db"
-    if os.path.exists("/app")
-    else "sqlite:///D:/rag_chatbot/data/chat_history.db",
-)
+def _get_database_url() -> str:
+    url = os.getenv("CONVERSATION_DATABASE_URL")
+    if url:
+        if not os.path.exists("/app") and "/app/shared_data" in url:
+            local_path = (PROJECT_ROOT / "shared_data" / "chat_history.db").as_posix()
+            return f"sqlite:///{local_path}"
+        return url
+
+    if os.path.exists("/app"):
+        return "sqlite:////app/shared_data/chat_history.db"
+
+    local_path = (PROJECT_ROOT / "shared_data" / "chat_history.db").as_posix()
+    return f"sqlite:///{local_path}"
+
+
+DATABASE_URL = _get_database_url()
 
 if DATABASE_URL.startswith("sqlite") and ":///" in DATABASE_URL:
     db_path = DATABASE_URL.split(":///", 1)[1]

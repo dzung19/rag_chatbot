@@ -21,6 +21,9 @@ export async function* streamChat(
       top_k: params.top_k ?? 5,
       temperature: params.temperature ?? 0.7,
       stream: params.stream ?? true,
+      conversation_id: params.conversation_id,
+      skill_id: params.skill_id,
+      modifier_skill_ids: params.modifier_skill_ids,
     }),
     signal,
   });

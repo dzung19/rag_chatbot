@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router";
 import { useChatStore } from "../../stores/chatStore";
 import { Greeting } from "./Greeting";
@@ -11,17 +11,31 @@ export const ChatView: React.FC = () => {
   const navigate = useNavigate();
   const { conversations, activeId, selectConversation, isStreaming } =
     useChatStore();
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (id) {
-      if (conversations[id]) {
-        selectConversation(id);
-      } else {
-        // Unknown id -> navigate to root
-        navigate("/", { replace: true });
-      }
-    }
-  }, [id, conversations, selectConversation, navigate]);
+    if (!id) return;
+
+    let isMounted = true;
+    setLoading(true);
+
+    selectConversation(id)
+      .catch((err) => {
+        console.warn("Failed to load conversation:", err);
+        if (isMounted) {
+          navigate("/", { replace: true });
+        }
+      })
+      .finally(() => {
+        if (isMounted) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [id, selectConversation, navigate]);
 
   const currentConv = (id && conversations[id]) || (activeId && conversations[activeId]);
   const hasMessages = currentConv && currentConv.messages.length > 0;
@@ -36,7 +50,20 @@ export const ChatView: React.FC = () => {
         overflow: "hidden",
       }}
     >
-      {!hasMessages ? (
+      {loading && !currentConv ? (
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "var(--text-muted)",
+            fontSize: "var(--text-sm)",
+          }}
+        >
+          Loading conversation...
+        </div>
+      ) : !hasMessages ? (
         <div
           style={{
             flex: 1,

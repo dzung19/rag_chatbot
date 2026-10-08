@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { NavLink, useNavigate } from "react-router";
 import {
   PanelLeftClose,
@@ -19,11 +19,22 @@ import styles from "./Sidebar.module.css";
 export const Sidebar: React.FC = () => {
   const navigate = useNavigate();
   const { sidebarCollapsed, toggleSidebar } = useUiStore();
-  const { conversations, order, activeId, newConversation, deleteConversation, renameConversation } =
-    useChatStore();
+  const {
+    conversations,
+    order,
+    activeId,
+    newConversation,
+    deleteConversation,
+    renameConversation,
+    loadConversations,
+  } = useChatStore();
   const { status, modelName } = useHealthStore();
 
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+
+  useEffect(() => {
+    loadConversations();
+  }, [loadConversations]);
 
   const handleNewChat = () => {
     const id = newConversation();

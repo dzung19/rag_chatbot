@@ -1,5 +1,7 @@
-import { deleteRequest, getJSON, postJSON, uploadFile } from "./client";
+import { deleteRequest, getJSON, patchJSON, postJSON, uploadFile } from "./client";
 import type {
+  ApiConversationDetail,
+  ApiConversationSummary,
   DocumentsResponse,
   HealthResponse,
   LogsQueryParams,
@@ -33,4 +35,20 @@ export async function triggerSharePointSync(): Promise<{ message?: string }> {
 
 export async function getSharePointAuthUrl(): Promise<SharePointAuthUrlResponse> {
   return getJSON<SharePointAuthUrlResponse>("/onedrive/auth-url");
+}
+
+export async function fetchConversations(limit = 50): Promise<ApiConversationSummary[]> {
+  return getJSON<ApiConversationSummary[]>(`/conversations?limit=${limit}`);
+}
+
+export async function fetchConversation(conversationId: string): Promise<ApiConversationDetail> {
+  return getJSON<ApiConversationDetail>(`/conversations/${conversationId}`);
+}
+
+export async function renameConversationApi(conversationId: string, title: string): Promise<ApiConversationSummary> {
+  return patchJSON<ApiConversationSummary>(`/conversations/${conversationId}`, { title });
+}
+
+export async function deleteConversationApi(conversationId: string): Promise<{ message?: string }> {
+  return deleteRequest(`/conversations/${conversationId}`);
 }

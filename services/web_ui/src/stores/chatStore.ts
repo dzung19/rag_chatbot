@@ -1,9 +1,16 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import type { ChatMessage, Conversation } from "../types/chat";
-import type { Source } from "../types/api";
+import type { ChatMessage, Conversation, MessageStatus } from "../types/chat";
+import type { ApiStoredMessage, Source } from "../types/api";
 import { streamChat } from "../api/sse";
-import { uploadDocumentFile } from "../api/endpoints";
+import {
+  deleteConversationApi,
+  fetchConversation,
+  fetchConversations,
+  renameConversationApi,
+  uploadDocumentFile,
+} from "../api/endpoints";
+import { ApiError } from "../api/client";
 import { titleFromQuery } from "../lib/titleFromQuery";
 import { useToastStore } from "./toastStore";
 
@@ -12,26 +19,64 @@ interface ChatState {
   order: string[]; // List of conversation IDs in reverse-chronological order
   activeId: string | null;
   isStreaming: boolean;
+  isLoading: boolean;
 
   newConversation: () => string;
-  selectConversation: (id: string) => void;
-  renameConversation: (id: string, newTitle: string) => void;
-  deleteConversation: (id: string) => void;
+  loadConversations: () => Promise<void>;
+  selectConversation: (id: string) => Promise<void>;
+  renameConversation: (id: string, newTitle: string) => Promise<void>;
+  deleteConversation: (id: string) => Promise<void>;
   sendMessage: (query: string, attachedFiles?: File[]) => Promise<void>;
   stopStreaming: () => void;
   regenerate: (messageId?: string) => Promise<void>;
   setFeedback: (conversationId: string, messageId: string, feedback: "up" | "down") => void;
-  clearAll: () => void;
+  clearAll: () => Promise<void>;
 }
 
 // Module-level abort controller for active streaming session
 let activeAbortController: AbortController | null = null;
 
-function generateId(): string {
+function generateUuid(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
-  return "id-" + Math.random().toString(36).slice(2, 11) + "-" + Date.now().toString(36);
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+function mapStoredMessageToChatMessage(msg: ApiStoredMessage): ChatMessage {
+  let sources: Source[] = [];
+  if (msg.sources_json) {
+    try {
+      const parsed = JSON.parse(msg.sources_json);
+      if (Array.isArray(parsed)) {
+        sources = parsed;
+      }
+    } catch {
+      sources = [];
+    }
+  }
+
+  let status: MessageStatus = "done";
+  if (msg.status === "generating" || msg.status === "streaming") {
+    status = "streaming";
+  } else if (msg.status === "failed") {
+    status = "error";
+  } else if (msg.status === "cancelled") {
+    status = "stopped";
+  }
+
+  return {
+    id: msg.id,
+    role: msg.role === "assistant" ? "assistant" : "user",
+    content: msg.content || "",
+    sources,
+    status,
+    createdAt: msg.created_at ? new Date(msg.created_at).getTime() : Date.now(),
+  };
 }
 
 export const useChatStore = create<ChatState>()(
@@ -41,9 +86,10 @@ export const useChatStore = create<ChatState>()(
       order: [],
       activeId: null,
       isStreaming: false,
+      isLoading: false,
 
       newConversation: () => {
-        const id = generateId();
+        const id = generateUuid();
         const newConv: Conversation = {
           id,
           title: "New chat",
@@ -60,15 +106,98 @@ export const useChatStore = create<ChatState>()(
         return id;
       },
 
-      selectConversation: (id: string) => {
-        if (get().conversations[id]) {
-          set({ activeId: id });
+      loadConversations: async () => {
+        try {
+          const summaries = await fetchConversations();
+          set((state) => {
+            const nextConvs = { ...state.conversations };
+            const backendOrder: string[] = [];
+
+            for (const item of summaries) {
+              backendOrder.push(item.id);
+              const existing = nextConvs[item.id];
+              const updatedAt = item.updated_at ? new Date(item.updated_at).getTime() : Date.now();
+              if (existing) {
+                nextConvs[item.id] = {
+                  ...existing,
+                  title: item.title || existing.title,
+                  updatedAt,
+                };
+              } else {
+                nextConvs[item.id] = {
+                  id: item.id,
+                  title: item.title || "New chat",
+                  messages: [],
+                  updatedAt,
+                };
+              }
+            }
+
+            // Keep local-only conversations (e.g. freshly created blank chats) at the top
+            const localOnly = state.order.filter((id) => !backendOrder.includes(id));
+            const newOrder = [...localOnly, ...backendOrder];
+
+            return {
+              conversations: nextConvs,
+              order: newOrder,
+            };
+          });
+        } catch (err) {
+          console.warn("Failed to load conversations from backend:", err);
         }
       },
 
-      renameConversation: (id: string, newTitle: string) => {
+      selectConversation: async (id: string) => {
+        const state = get();
+        if (state.conversations[id]) {
+          set({ activeId: id });
+        }
+
+        // Avoid overwriting conversation state if currently streaming this conversation
+        if (get().isStreaming && get().activeId === id) {
+          return;
+        }
+
+        const currentConv = get().conversations[id];
+
+        try {
+          const detail = await fetchConversation(id);
+          const messages = (detail.messages || []).map(mapStoredMessageToChatMessage);
+
+          set((s) => {
+            const prev = s.conversations[id];
+            const updatedConv: Conversation = {
+              id: detail.id,
+              title: detail.title || prev?.title || "New chat",
+              messages,
+              updatedAt: detail.updated_at
+                ? new Date(detail.updated_at).getTime()
+                : (prev?.updatedAt ?? Date.now()),
+            };
+
+            const nextOrder = s.order.includes(id) ? s.order : [id, ...s.order];
+
+            return {
+              conversations: {
+                ...s.conversations,
+                [id]: updatedConv,
+              },
+              order: nextOrder,
+              activeId: id,
+            };
+          });
+        } catch (err: unknown) {
+          // If conversation is neither in backend nor in local cache, rethrow
+          if (!currentConv) {
+            throw err;
+          }
+        }
+      },
+
+      renameConversation: async (id: string, newTitle: string) => {
         const trimmed = newTitle.trim();
         if (!trimmed) return;
+
         set((state) => {
           const conv = state.conversations[id];
           if (!conv) return state;
@@ -79,9 +208,19 @@ export const useChatStore = create<ChatState>()(
             },
           };
         });
+
+        try {
+          await renameConversationApi(id, trimmed);
+        } catch (err: unknown) {
+          const is404 = err instanceof ApiError && err.status === 404;
+          if (!is404) {
+            console.error("Failed to rename conversation on server:", err);
+            useToastStore.getState().pushToast("Failed to rename conversation on server", "error");
+          }
+        }
       },
 
-      deleteConversation: (id: string) => {
+      deleteConversation: async (id: string) => {
         set((state) => {
           const nextConvs = { ...state.conversations };
           delete nextConvs[id];
@@ -95,6 +234,16 @@ export const useChatStore = create<ChatState>()(
             activeId: nextActiveId,
           };
         });
+
+        try {
+          await deleteConversationApi(id);
+        } catch (err: unknown) {
+          const is404 = err instanceof ApiError && err.status === 404;
+          if (!is404) {
+            console.error("Failed to delete conversation on server:", err);
+            useToastStore.getState().pushToast("Failed to delete conversation on server", "error");
+          }
+        }
       },
 
       sendMessage: async (query: string, attachedFiles?: File[]) => {
@@ -111,7 +260,7 @@ export const useChatStore = create<ChatState>()(
         // 1. Handle file uploads if any
         if (hasFiles) {
           set({ isStreaming: true });
-          const uploadMsgId = generateId();
+          const uploadMsgId = generateUuid();
           const uploadMsg: ChatMessage = {
             id: uploadMsgId,
             role: "assistant",
@@ -199,7 +348,7 @@ export const useChatStore = create<ChatState>()(
         }
 
         // 2. Add User Message
-        const userMsgId = generateId();
+        const userMsgId = generateUuid();
         const userMsg: ChatMessage = {
           id: userMsgId,
           role: "user",
@@ -210,7 +359,7 @@ export const useChatStore = create<ChatState>()(
         };
 
         // 3. Add Assistant Message placeholder
-        const assistantMsgId = generateId();
+        const assistantMsgId = generateUuid();
         const assistantMsg: ChatMessage = {
           id: assistantMsgId,
           role: "assistant",
@@ -220,10 +369,13 @@ export const useChatStore = create<ChatState>()(
           createdAt: Date.now(),
         };
 
+        let isFirstMessage = false;
+        let nextTitle = "";
+
         set((state) => {
           const conv = state.conversations[activeId!];
-          const isFirstMessage = conv.messages.filter((m) => m.role === "user").length === 0;
-          const nextTitle = isFirstMessage ? titleFromQuery(trimmedQuery) : conv.title;
+          isFirstMessage = conv.messages.filter((m) => m.role === "user").length === 0;
+          nextTitle = isFirstMessage ? titleFromQuery(trimmedQuery) : conv.title;
 
           return {
             isStreaming: true,
@@ -247,7 +399,13 @@ export const useChatStore = create<ChatState>()(
 
         try {
           const stream = streamChat(
-            { query: trimmedQuery, top_k: 5, temperature: 0.7, stream: true },
+            {
+              query: trimmedQuery,
+              top_k: 5,
+              temperature: 0.7,
+              stream: true,
+              conversation_id: activeId,
+            },
             activeAbortController.signal
           );
 
@@ -334,6 +492,11 @@ export const useChatStore = create<ChatState>()(
                   },
                 };
               });
+
+              // If first message in chat, sync title to backend
+              if (isFirstMessage && nextTitle && nextTitle !== "New chat") {
+                renameConversationApi(activeId, nextTitle).catch(() => {});
+              }
             }
           }
         } catch (err: unknown) {
@@ -468,13 +631,16 @@ export const useChatStore = create<ChatState>()(
         });
       },
 
-      clearAll: () => {
+      clearAll: async () => {
+        const ids = Object.keys(get().conversations);
         set({
           conversations: {},
           order: [],
           activeId: null,
           isStreaming: false,
         });
+
+        await Promise.allSettled(ids.map((id) => deleteConversationApi(id)));
       },
     }),
     {

@@ -6,9 +6,11 @@ Central entry point for all client requests. Proxies to downstream services.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import json
 import logging
 import os
 import sys
+import uuid
 
 import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
@@ -35,6 +37,7 @@ from shared.models import (
     ServiceHealth,
 )
 from shared.security import (
+    CurrentUser,
     RateLimitMiddleware,
     SecurityHeadersMiddleware,
     get_current_user,
@@ -72,8 +75,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["X-API-Key", "Content-Type"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
 )
 
 
@@ -95,26 +98,116 @@ async def _get_client() -> httpx.AsyncClient:
 # Chat Endpoints
 # ---------------------------------------------------------------------------
 
-@app.post("/api/v1/chat", dependencies=[Depends(get_current_user)])
-async def chat_stream(request: ChatRequest):
-    """Streaming chat endpoint — proxies to RAG engine via SSE."""
+@app.post("/api/v1/chat")
+async def chat_stream(
+    request: ChatRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Streaming chat endpoint — proxies to RAG engine via SSE and records conversation turns."""
     if detect_prompt_injection(request.query):
         raise HTTPException(status_code=400, detail="Query rejected due to security policy (potential prompt injection).")
         
     settings = get_settings()
     client = await _get_client()
 
+    turn_id = None
+    assistant_msg_id = None
+
+    if request.conversation_id:
+        try:
+            start_resp = await client.post(
+                f"{settings.conversation_service_url}/internal/turns/start",
+                json={
+                    "conversation_id": request.conversation_id,
+                    "request_id": str(uuid.uuid4()),
+                    "owner_id": current_user.user_id,
+                    "content": request.query,
+                    "selected_document_ids": [],
+                },
+                headers={"x-internal-service-key": settings.internal_service_key or ""},
+                timeout=10.0,
+            )
+            if start_resp.is_success:
+                start_data = start_resp.json()
+                turn_id = start_data.get("turn_id")
+                assistant_msg_id = start_data.get("assistant_message_id")
+        except Exception as e:
+            logger.warning("Failed to start turn in conversation service: %s", str(e))
+
     try:
         # Forward to RAG engine streaming endpoint
         async def proxy_stream():
-            async with client.stream(
-                "POST",
-                f"{settings.rag_engine_service_url}/rag/query",
-                json=request.model_dump(),
-            ) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    yield chunk
+            buffer = ""
+            accumulated_tokens = []
+            captured_sources = []
+            stream_failed = False
+            try:
+                async with client.stream(
+                    "POST",
+                    f"{settings.rag_engine_service_url}/rag/query",
+                    json=request.model_dump(),
+                ) as response:
+                    response.raise_for_status()
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+                        buffer += chunk.decode("utf-8", errors="ignore")
+                        while "\n\n" in buffer:
+                            raw_event, buffer = buffer.split("\n\n", 1)
+                            lines = raw_event.strip().split("\n")
+                            event_type = None
+                            data_lines = []
+                            for line in lines:
+                                if line.startswith("event:"):
+                                    event_type = line.split(":", 1)[1].strip()
+                                elif line.startswith("data:"):
+                                    data_lines.append(line.split(":", 1)[1].strip())
+                            data_str = "\n".join(data_lines)
+                            if event_type == "sources" and data_str:
+                                try:
+                                    captured_sources = json.loads(data_str)
+                                except Exception:
+                                    pass
+                            elif event_type == "token" and data_str:
+                                try:
+                                    token_val = json.loads(data_str)
+                                    accumulated_tokens.append(token_val if isinstance(token_val, str) else data_str)
+                                except Exception:
+                                    accumulated_tokens.append(data_str)
+                            elif event_type == "error":
+                                stream_failed = True
+            except Exception as e:
+                stream_failed = True
+                logger.error("Chat stream error: %s", str(e))
+                raise
+            finally:
+                if turn_id and assistant_msg_id:
+                    full_content = "".join(accumulated_tokens)
+                    try:
+                        if stream_failed:
+                            await client.post(
+                                f"{settings.conversation_service_url}/internal/turns/{turn_id}/fail",
+                                json={
+                                    "owner_id": current_user.user_id,
+                                    "assistant_message_id": assistant_msg_id,
+                                    "partial_content": full_content,
+                                },
+                                headers={"x-internal-service-key": settings.internal_service_key or ""},
+                                timeout=10.0,
+                            )
+                        else:
+                            await client.post(
+                                f"{settings.conversation_service_url}/internal/turns/{turn_id}/complete",
+                                json={
+                                    "owner_id": current_user.user_id,
+                                    "assistant_message_id": assistant_msg_id,
+                                    "content": full_content,
+                                    "sources": captured_sources,
+                                },
+                                headers={"x-internal-service-key": settings.internal_service_key or ""},
+                                timeout=10.0,
+                            )
+                    except Exception as err:
+                        logger.warning("Failed to complete/fail turn: %s", str(err))
 
         return StreamingResponse(
             proxy_stream(),
@@ -132,14 +225,41 @@ async def chat_stream(request: ChatRequest):
         raise HTTPException(status_code=500, detail="An error occurred.")
 
 
-@app.post("/api/v1/chat/sync", response_model=ChatResponse, dependencies=[Depends(get_current_user)])
-async def chat_sync(request: ChatRequest):
-    """Non-streaming chat endpoint."""
+@app.post("/api/v1/chat/sync", response_model=ChatResponse)
+async def chat_sync(
+    request: ChatRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Non-streaming chat endpoint with conversation persistence."""
     if detect_prompt_injection(request.query):
         raise HTTPException(status_code=400, detail="Query rejected due to security policy (potential prompt injection).")
         
     settings = get_settings()
     client = await _get_client()
+
+    turn_id = None
+    assistant_msg_id = None
+
+    if request.conversation_id:
+        try:
+            start_resp = await client.post(
+                f"{settings.conversation_service_url}/internal/turns/start",
+                json={
+                    "conversation_id": request.conversation_id,
+                    "request_id": str(uuid.uuid4()),
+                    "owner_id": current_user.user_id,
+                    "content": request.query,
+                    "selected_document_ids": [],
+                },
+                headers={"x-internal-service-key": settings.internal_service_key or ""},
+                timeout=10.0,
+            )
+            if start_resp.is_success:
+                start_data = start_resp.json()
+                turn_id = start_data.get("turn_id")
+                assistant_msg_id = start_data.get("assistant_message_id")
+        except Exception as e:
+            logger.warning("Failed to start turn in conversation service: %s", str(e))
 
     try:
         response = await client.post(
@@ -147,11 +267,163 @@ async def chat_sync(request: ChatRequest):
             json=request.model_dump(),
         )
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+
+        if turn_id and assistant_msg_id:
+            try:
+                sources_list = [s.model_dump() if hasattr(s, "model_dump") else s for s in data.get("sources", [])]
+                await client.post(
+                    f"{settings.conversation_service_url}/internal/turns/{turn_id}/complete",
+                    json={
+                        "owner_id": current_user.user_id,
+                        "assistant_message_id": assistant_msg_id,
+                        "content": data.get("answer", ""),
+                        "sources": sources_list,
+                    },
+                    headers={"x-internal-service-key": settings.internal_service_key or ""},
+                    timeout=10.0,
+                )
+            except Exception as err:
+                logger.warning("Failed to complete turn in conversation service: %s", str(err))
+
+        return data
     except httpx.ConnectError:
+        if turn_id and assistant_msg_id:
+            try:
+                await client.post(
+                    f"{settings.conversation_service_url}/internal/turns/{turn_id}/fail",
+                    json={
+                        "owner_id": current_user.user_id,
+                        "assistant_message_id": assistant_msg_id,
+                        "partial_content": "",
+                    },
+                    headers={"x-internal-service-key": settings.internal_service_key or ""},
+                    timeout=10.0,
+                )
+            except Exception:
+                pass
         raise HTTPException(status_code=503, detail="RAG engine service unavailable.")
     except Exception as e:
         logger.error("Chat sync error: %s", str(e))
+        raise HTTPException(status_code=500, detail="An error occurred.")
+
+
+# ---------------------------------------------------------------------------
+# Conversation Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/conversations")
+async def list_conversations(
+    limit: int = 50,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """List conversation summaries for the current user."""
+    settings = get_settings()
+    client = await _get_client()
+    try:
+        response = await client.get(
+            f"{settings.conversation_service_url}/conversations",
+            params={"limit": limit},
+            headers={
+                "x-user-id": current_user.user_id,
+                "x-internal-service-key": settings.internal_service_key or "",
+            },
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        return response.json()
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail="Conversation service unavailable.")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+    except Exception as e:
+        logger.error("List conversations error: %s", str(e))
+        raise HTTPException(status_code=500, detail="An error occurred.")
+
+
+@app.get("/api/v1/conversations/{conversation_id}")
+async def get_conversation(
+    conversation_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Get conversation details with all turn messages."""
+    settings = get_settings()
+    client = await _get_client()
+    try:
+        response = await client.get(
+            f"{settings.conversation_service_url}/conversations/{conversation_id}",
+            headers={
+                "x-user-id": current_user.user_id,
+                "x-internal-service-key": settings.internal_service_key or "",
+            },
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        return response.json()
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail="Conversation service unavailable.")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+    except Exception as e:
+        logger.error("Get conversation error: %s", str(e))
+        raise HTTPException(status_code=500, detail="An error occurred.")
+
+
+@app.patch("/api/v1/conversations/{conversation_id}")
+async def rename_conversation(
+    conversation_id: str,
+    body: dict,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Rename a conversation."""
+    settings = get_settings()
+    client = await _get_client()
+    try:
+        response = await client.patch(
+            f"{settings.conversation_service_url}/conversations/{conversation_id}",
+            json=body,
+            headers={
+                "x-user-id": current_user.user_id,
+                "x-internal-service-key": settings.internal_service_key or "",
+            },
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        return response.json()
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail="Conversation service unavailable.")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+    except Exception as e:
+        logger.error("Rename conversation error: %s", str(e))
+        raise HTTPException(status_code=500, detail="An error occurred.")
+
+
+@app.delete("/api/v1/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Soft-delete a conversation."""
+    settings = get_settings()
+    client = await _get_client()
+    try:
+        response = await client.delete(
+            f"{settings.conversation_service_url}/conversations/{conversation_id}",
+            headers={
+                "x-user-id": current_user.user_id,
+                "x-internal-service-key": settings.internal_service_key or "",
+            },
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        return {"message": "Conversation deleted."}
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail="Conversation service unavailable.")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+    except Exception as e:
+        logger.error("Delete conversation error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
 
 

@@ -87,6 +87,15 @@ export async function postJSON<T>(path: string, body: unknown, options: RequestI
   return (await res.json()) as T;
 }
 
+export async function patchJSON<T>(path: string, body: unknown, options: RequestInit = {}): Promise<T> {
+  const res = await request(path, {
+    ...options,
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+  return (await res.json()) as T;
+}
+
 export async function deleteRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await request(path, { ...options, method: "DELETE" });
   return (await res.json()) as T;
