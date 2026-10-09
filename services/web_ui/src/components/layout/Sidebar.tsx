@@ -10,6 +10,7 @@ import {
   EllipsisVertical,
   Pencil,
   Trash2,
+  Sparkles,
 } from "lucide-react";
 import { useUiStore } from "../../stores/uiStore";
 import { useChatStore } from "../../stores/chatStore";
@@ -73,6 +74,18 @@ export const Sidebar: React.FC = () => {
       {/* Top Section */}
       <div className={styles.topSection}>
         <div className={styles.headerRow}>
+          {!sidebarCollapsed && (
+            <button 
+              className={styles.brandLink}
+              onClick={() => navigate("/")}
+              title="Home"
+              type="button"
+            >
+              <Sparkles size={22} className={styles.brandIcon} />
+              <span className={styles.brandName}>BIVN Assistant</span>
+            </button>
+          )}
+
           <button
             className={styles.toggleBtn}
             onClick={toggleSidebar}

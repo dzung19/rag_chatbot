@@ -50,20 +50,22 @@ def verify_internal_service(
             Header(),
         ] = None,
 ) -> None:
-    expected = os.getenv(
-        "INTERNAL_SERVICE_KEY",
-    )
+    expected = os.getenv("INTERNAL_SERVICE_KEY")
 
-    if (
-        not expected
-        or x_internal_service_key
-        != expected
+    if not expected or not x_internal_service_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid internal credential.",
+        )
+        
+    import hmac
+    if not hmac.compare_digest(
+        x_internal_service_key.encode("utf-8"), 
+        expected.encode("utf-8")
     ):
         raise HTTPException(
-            status_code=
-                status.HTTP_401_UNAUTHORIZED,
-            detail=
-                "Invalid internal credential.",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid internal credential.",
         )
 
 
