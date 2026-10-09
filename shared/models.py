@@ -41,7 +41,7 @@ class Skill(BaseModel):
         description="Optional temperature override for LLM"
     )
     top_k_override: Optional[int] = Field(
-        default=None, ge=1, le=20, 
+        default=None, ge=1, le=50, 
         description="Optional top_k override for retriever"
     )
     
@@ -61,7 +61,7 @@ class SkillCreateRequest(BaseModel):
     type: SkillType = Field(default=SkillType.MAIN)
     system_prompt_addon: str = Field(..., min_length=10, max_length=4000)
     temperature_override: Optional[float] = Field(default=None, ge=0.0, le=2.0)
-    top_k_override: Optional[int] = Field(default=None, ge=1, le=20)
+    top_k_override: Optional[int] = Field(default=None, ge=1, le=50)
     icon: Optional[str] = Field(default="Sparkles")
 
 class SkillUpdateRequest(BaseModel):
@@ -69,7 +69,7 @@ class SkillUpdateRequest(BaseModel):
     description: Optional[str] = Field(None, max_length=256)
     system_prompt_addon: Optional[str] = Field(None, min_length=10, max_length=4000)
     temperature_override: Optional[float] = Field(None, ge=0.0, le=2.0)
-    top_k_override: Optional[int] = Field(None, ge=1, le=20)
+    top_k_override: Optional[int] = Field(None, ge=1, le=50)
     icon: Optional[str] = None
 
 class SkillListResponse(BaseModel):
@@ -104,7 +104,7 @@ class DocumentType(str, Enum):
 class ChatRequest(BaseModel):
     """User chat query."""
     query: str = Field(..., min_length=1, max_length=5000, description="User question")
-    top_k: int = Field(default=5, ge=1, le=20, description="Number of context chunks to retrieve")
+    top_k: int = Field(default=5, ge=1, le=50, description="Number of context chunks to retrieve")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="LLM temperature")
     stream: bool = Field(default=True, description="Whether to stream the response via SSE")
     
@@ -121,6 +121,12 @@ class ChatRequest(BaseModel):
     modifier_skill_ids: list[str] = Field(
         default_factory=list,
         description="List of active modifier skill IDs"
+    )
+    
+    # Scoped / uploaded documents (e.g. for compare or direct reading)
+    selected_document_ids: list[str] = Field(
+        default_factory=list,
+        description="List of document IDs uploaded or scoped for this query"
     )
 
 

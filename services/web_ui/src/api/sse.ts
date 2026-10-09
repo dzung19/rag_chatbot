@@ -25,6 +25,7 @@ export async function* streamChat(
       request_id: params.request_id,
       skill_id: params.skill_id,
       modifier_skill_ids: params.modifier_skill_ids,
+      selected_document_ids: params.selected_document_ids ?? [],
     }),
     signal,
   });

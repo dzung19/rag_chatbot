@@ -258,6 +258,8 @@ export const useChatStore = create<ChatState>()(
           activeId = get().newConversation();
         }
 
+        const uploadedDocumentIds: string[] = [];
+
         // 1. Handle file uploads if any
         if (hasFiles) {
           set({ isStreaming: true });
@@ -287,7 +289,10 @@ export const useChatStore = create<ChatState>()(
 
           try {
             for (const file of attachedFiles) {
-              await uploadDocumentFile(file);
+              const res = await uploadDocumentFile(file);
+              if (res?.document_id) {
+                uploadedDocumentIds.push(res.document_id);
+              }
             }
 
             // Update upload assistant message
@@ -409,6 +414,7 @@ export const useChatStore = create<ChatState>()(
               conversation_id: activeId,
               skill_id: activeMainSkillId,
               modifier_skill_ids: activeModifierSkillIds,
+              selected_document_ids: uploadedDocumentIds,
             },
             activeAbortController.signal
           );

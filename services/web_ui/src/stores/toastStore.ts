@@ -2,19 +2,19 @@ import { create } from "zustand";
 
 export interface ToastItem {
   id: string;
-  type: "success" | "error" | "info";
+  type: "success" | "error" | "info" | "warning";
   message: string;
 }
 
 interface ToastState {
   toasts: ToastItem[];
-  pushToast: (message: string, type?: "success" | "error" | "info") => void;
+  pushToast: (message: string, type?: "success" | "error" | "info" | "warning") => void;
   dismissToast: (id: string) => void;
 }
 
 export const useToastStore = create<ToastState>()((set) => ({
   toasts: [],
-  pushToast: (message: string, type: "success" | "error" | "info" = "info") => {
+  pushToast: (message: string, type: "success" | "error" | "info" | "warning" = "info") => {
     const id = Math.random().toString(36).slice(2, 9);
     set((state) => ({
       toasts: [...state.toasts, { id, type, message }],

@@ -1,9 +1,11 @@
 import React, { useRef, useState, useEffect } from "react";
-import { Plus, ArrowUp, Square } from "lucide-react";
+import { Plus, ArrowUp, Square, GitCompare } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore";
 import { useToastStore } from "../../stores/toastStore";
+import { useSkillStore } from "../../stores/skillStore";
 import { AttachmentChips } from "./AttachmentChips";
 import { SkillSelector } from "./SkillSelector";
+import { CompareRequirementDialog } from "./CompareRequirementDialog";
 import { validateChatFile } from "../../lib/fileValidation";
 import { MAX_INPUT_CHARS, MAX_CHAT_FILES } from "../../lib/constants";
 import styles from "./Composer.module.css";
@@ -11,10 +13,12 @@ import styles from "./Composer.module.css";
 export const Composer: React.FC = () => {
   const { sendMessage, isStreaming, stopStreaming } = useChatStore();
   const { pushToast } = useToastStore();
+  const { activeMainSkillId } = useSkillStore();
 
   const [input, setInput] = useState("");
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [showCompareDialog, setShowCompareDialog] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -56,7 +60,12 @@ export const Composer: React.FC = () => {
 
   const handleSend = async () => {
     const trimmed = input.trim();
-    if ((!trimmed && attachedFiles.length === 0) || isStreaming) return;
+    if (!trimmed || isStreaming) return;
+
+    if (activeMainSkillId === "business-compare" && attachedFiles.length !== 2) {
+      setShowCompareDialog(true);
+      return;
+    }
 
     const filesToSend = [...attachedFiles];
     setInput("");
@@ -91,7 +100,7 @@ export const Composer: React.FC = () => {
     handleFilesChosen(e.dataTransfer.files);
   };
 
-  const canSend = (input.trim().length > 0 || attachedFiles.length > 0) && !isStreaming;
+  const canSend = input.trim().length > 0 && !isStreaming;
 
   return (
     <div className={styles.composerContainer}>
@@ -102,7 +111,34 @@ export const Composer: React.FC = () => {
         onDrop={handleDrop}
       >
         <SkillSelector />
-        
+
+        {activeMainSkillId === "business-compare" && (
+          <div
+            className={`${styles.compareNotice} ${
+              attachedFiles.length !== 2 ? styles.invalid : ""
+            }`}
+            onClick={() => setShowCompareDialog(true)}
+            role="button"
+            tabIndex={0}
+            title="Nhấn để xem chi tiết yêu cầu tài liệu so sánh"
+          >
+            <GitCompare size={14} />
+            <span>
+              So sánh Nghiệp vụ: Cần chính xác 2 file ({attachedFiles.length}/2)
+            </span>
+            {attachedFiles.length !== 2 ? (
+              <span className={styles.noticeAlert}>Chưa đủ 2 file</span>
+            ) : (
+              <span
+                className={styles.noticeAlert}
+                style={{ color: "var(--badge-green-text)" }}
+              >
+                ✓ Đã đủ 2 file
+              </span>
+            )}
+          </div>
+        )}
+
         <AttachmentChips files={attachedFiles} onRemove={handleRemoveFile} />
 
         <div className={styles.inputRow}>
@@ -171,6 +207,13 @@ export const Composer: React.FC = () => {
           Answers are generated from indexed company documents and may contain mistakes.
         </span>
       </div>
+
+      <CompareRequirementDialog
+        isOpen={showCompareDialog}
+        onClose={() => setShowCompareDialog(false)}
+        attachedFiles={attachedFiles}
+        onUploadClick={handleAttachClick}
+      />
     </div>
   );
 };

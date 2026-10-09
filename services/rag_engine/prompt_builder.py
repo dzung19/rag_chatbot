@@ -91,6 +91,64 @@ def build_context_text(
     return "\n\n---\n\n".join(context_sections)
 
 
+def build_compare_context_text(
+    context_chunks: list[dict],
+    max_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
+) -> str:
+    """Format and balance full text of documents for direct comparison.
+
+    Ensures fair character budgeting so neither document dominates the context window.
+    """
+    if not context_chunks:
+        return "No documents provided for comparison."
+
+    if len(context_chunks) != 2:
+        return build_context_text(context_chunks, max_chars=max_chars)
+
+    doc1 = context_chunks[0]
+    doc2 = context_chunks[1]
+
+    name1 = doc1.get("metadata", {}).get("filename") or "Tài liệu 1"
+    name2 = doc2.get("metadata", {}).get("filename") or "Tài liệu 2"
+
+    text1 = doc1.get("text", "").strip()
+    text2 = doc2.get("text", "").strip()
+
+    # Reserve characters for headers and separators
+    overhead = len(name1) + len(name2) + 250
+    available_chars = max(1000, max_chars - overhead)
+
+    len1 = len(text1)
+    len2 = len(text2)
+
+    # Balanced truncation if combined length exceeds budget
+    if len1 + len2 > available_chars:
+        half = available_chars // 2
+        if len1 <= half:
+            budget1 = len1
+            budget2 = available_chars - budget1
+        elif len2 <= half:
+            budget2 = len2
+            budget1 = available_chars - budget2
+        else:
+            budget1 = half
+            budget2 = half
+
+        if len1 > budget1:
+            text1 = text1[:budget1] + "\n... [Nội dung phía sau đã được cắt bớt để đảm bảo giới hạn bộ nhớ ngữ cảnh]"
+        if len2 > budget2:
+            text2 = text2[:budget2] + "\n... [Nội dung phía sau đã được cắt bớt để đảm bảo giới hạn bộ nhớ ngữ cảnh]"
+
+    return (
+        f"=== TÀI LIỆU 1 (GỐC / THAM CHIẾU): {name1} ===\n"
+        f"{text1}\n"
+        f"=== HẾT TÀI LIỆU 1 ===\n\n"
+        f"=== TÀI LIỆU 2 (ĐỐI CHIẾU / SO SÁNH): {name2} ===\n"
+        f"{text2}\n"
+        f"=== HẾT TÀI LIỆU 2 ==="
+    )
+
+
 def build_rag_messages(
     query: str,
     context_chunks: list[dict],
@@ -112,7 +170,10 @@ def build_rag_messages(
     Returns:
         List of message dicts: [{"role": "system", ...}, {"role": "user", ...}]
     """
-    context_text = build_context_text(context_chunks, max_chars=max_context_chars)
+    if main_skill and main_skill.id == "business-compare" and len(context_chunks) == 2:
+        context_text = build_compare_context_text(context_chunks, max_chars=max_context_chars)
+    else:
+        context_text = build_context_text(context_chunks, max_chars=max_context_chars)
     
     # Inject skills into system prompt
     final_system_prompt = system_prompt
@@ -143,9 +204,13 @@ def build_rag_prompt(
     context_chunks: list[dict],
     system_prompt: str = SYSTEM_PROMPT,
     max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
+    main_skill: Optional[Skill] = None,
 ) -> str:
     """Build a single-string RAG prompt for backward compatibility."""
-    context_text = build_context_text(context_chunks, max_chars=max_context_chars)
+    if main_skill and main_skill.id == "business-compare" and len(context_chunks) == 2:
+        context_text = build_compare_context_text(context_chunks, max_chars=max_context_chars)
+    else:
+        context_text = build_context_text(context_chunks, max_chars=max_context_chars)
 
     return f"""{system_prompt}
 

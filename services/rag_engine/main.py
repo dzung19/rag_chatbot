@@ -206,9 +206,23 @@ async def query_sync(
             if main_skill.temperature_override is not None:
                 temperature = main_skill.temperature_override
 
-        # 1. Retrieve relevant context via parallel hybrid search
+        # 1. Retrieve relevant context (bypassing vector search if business-compare)
         retriever = _get_retriever()
-        results = await retriever.search(request.query, top_k=top_k)
+        if request.skill_id == "business-compare" and request.selected_document_ids:
+            logger.info(
+                "Skill 'business-compare' active with %d documents: %s. Fetching full documents (bypassing RAG).",
+                len(request.selected_document_ids),
+                request.selected_document_ids,
+            )
+            results = retriever.get_full_documents(request.selected_document_ids)
+            if not results:
+                logger.warning(
+                    "No full documents found in SQLite for IDs %s. Falling back to hybrid search.",
+                    request.selected_document_ids,
+                )
+                results = await retriever.search(request.query, top_k=top_k)
+        else:
+            results = await retriever.search(request.query, top_k=top_k)
 
         if not results:
             logger.info("No relevant context found for query: %s", request.query[:100])
@@ -294,9 +308,23 @@ async def query_stream(request: ChatRequest):
                 if main_skill.temperature_override is not None:
                     temperature = main_skill.temperature_override
 
-            # 1. Retrieve context via parallel hybrid search
+            # 1. Retrieve context (bypassing vector search if business-compare)
             retriever = _get_retriever()
-            results = await retriever.search(request.query, top_k=top_k)
+            if request.skill_id == "business-compare" and request.selected_document_ids:
+                logger.info(
+                    "Skill 'business-compare' active with %d documents: %s. Fetching full documents (bypassing RAG).",
+                    len(request.selected_document_ids),
+                    request.selected_document_ids,
+                )
+                results = retriever.get_full_documents(request.selected_document_ids)
+                if not results:
+                    logger.warning(
+                        "No full documents found in SQLite for IDs %s. Falling back to hybrid search.",
+                        request.selected_document_ids,
+                    )
+                    results = await retriever.search(request.query, top_k=top_k)
+            else:
+                results = await retriever.search(request.query, top_k=top_k)
 
             # Send enriched sources first
             sources = [

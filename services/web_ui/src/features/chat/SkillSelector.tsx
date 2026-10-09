@@ -1,11 +1,10 @@
 import React, { useEffect, useState } from "react";
-import { Zap, Bot, FileText, ShieldCheck, Mail, Scale, Wrench, Languages, Quote, Sparkles } from "lucide-react";
+import { Zap, Bot, FileText, ShieldCheck, Mail, Scale, Wrench, Languages, Quote, Sparkles, GitCompare } from "lucide-react";
 import { useSkillStore } from "../../stores/skillStore";
 import styles from "./SkillSelector.module.css";
-import type { Skill } from "../../types/api";
 
 const iconMap: Record<string, React.FC<any>> = {
-  Bot, FileText, ShieldCheck, Mail, Scale, Wrench, Languages, Zap, Quote, Sparkles
+  Bot, FileText, ShieldCheck, Mail, Scale, Wrench, Languages, Zap, Quote, Sparkles, GitCompare
 };
 
 export const SkillSelector: React.FC = () => {

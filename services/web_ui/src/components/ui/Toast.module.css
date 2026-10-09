@@ -37,6 +37,10 @@
   border-left: 4px solid var(--accent-blue);
 }
 
+.toast.warning {
+  border-left: 4px solid var(--badge-yellow-text);
+}
+
 .message {
   flex: 1;
   word-break: break-word;

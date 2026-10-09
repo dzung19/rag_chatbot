@@ -35,6 +35,46 @@
   box-shadow: 0 0 0 2px rgba(66, 133, 244, 0.25);
 }
 
+.compareNotice {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.75rem;
+  margin: 0.25rem 0.25rem 0.5rem;
+  border-radius: var(--radius-pill);
+  background: rgba(155, 114, 203, 0.1);
+  border: 1px solid rgba(155, 114, 203, 0.25);
+  color: var(--accent-purple);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  user-select: none;
+}
+
+.compareNotice:hover {
+  background: rgba(155, 114, 203, 0.18);
+  border-color: rgba(155, 114, 203, 0.4);
+}
+
+.compareNotice.invalid {
+  background: rgba(253, 214, 99, 0.1);
+  border-color: rgba(253, 214, 99, 0.3);
+  color: var(--badge-yellow-text);
+}
+
+.compareNotice.invalid:hover {
+  background: rgba(253, 214, 99, 0.18);
+}
+
+.noticeAlert {
+  margin-left: auto;
+  font-weight: 600;
+  font-size: 0.7rem;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 0.15rem 0.4rem;
+  border-radius: var(--radius-xs);
+}
+
 .inputRow {
   display: flex;
   align-items: flex-end;

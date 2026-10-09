@@ -97,6 +97,11 @@ def _init_skills_table(conn: sqlite3.Connection) -> None:
             "type": "main", "is_system": 1, "icon": "Wrench", "temp": 0.2, "top_k": 5,
             "prompt": "Provide a step-by-step diagnostic workflow. Start with the Problem Statement, analyze the Root Cause, and then provide Actionable Resolution Steps."
         },
+        {
+            "id": "business-compare", "name": "So sánh Nghiệp vụ", "description": "Yêu cầu upload chính xác 2 file để đối chiếu chuyên sâu.",
+            "type": "main", "is_system": 1, "icon": "GitCompare", "temp": 0.2, "top_k": 30,
+            "prompt": "[SKILL TEMPLATE] Bạn là một chuyên gia phân tích và đối chiếu nghiệp vụ. Nhiệm vụ của bạn là so sánh sự khác biệt chi tiết giữa 2 file tài liệu mà người dùng đã tải lên. Hãy lập bảng so sánh rõ ràng các điều khoản và thông tin quan trọng."
+        },
         # MODIFIER SKILLS
         {
             "id": "lang-vietnamese", "name": "Tiếng Việt Chuẩn", "description": "Always answer in Vietnamese.",

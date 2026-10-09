@@ -59,6 +59,7 @@ export interface ChatQueryParams {
   request_id?:string;
   skill_id?: string;
   modifier_skill_ids?: string[];
+  selected_document_ids?: string[];
 }
 
 export interface ApiConversationSummary {

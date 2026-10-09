@@ -242,6 +242,68 @@ class Retriever:
             logger.error("Hybrid search failed: %s", str(e))
             return []
 
+    def get_full_documents(self, document_ids: list[str]) -> list[dict]:
+        """Fetch full concatenated text for specified document IDs from SQLite FTS5 table.
+
+        Args:
+            document_ids: List of document IDs (UUIDs) to retrieve.
+
+        Returns:
+            List of dicts formatted like retriever chunks, where each item represents
+            a full document with concatenated text from all its chunks in original order.
+        """
+        if not document_ids:
+            return []
+
+        try:
+            conn = get_sqlite_connection()
+            placeholders = ",".join("?" for _ in document_ids)
+            query = f"""
+                SELECT rowid, id, document_id, filename, page, heading, text
+                FROM document_chunks
+                WHERE document_id IN ({placeholders})
+                ORDER BY document_id, rowid ASC
+            """
+            cursor = conn.execute(query, tuple(document_ids))
+            rows = cursor.fetchall()
+            conn.close()
+
+            # Group rows by document_id in the exact order requested
+            docs_by_id: dict[str, list] = {doc_id: [] for doc_id in document_ids}
+            for row in rows:
+                doc_id = row["document_id"]
+                if doc_id in docs_by_id:
+                    docs_by_id[doc_id].append(row)
+
+            full_docs = []
+            for doc_id in document_ids:
+                chunk_rows = docs_by_id.get(doc_id, [])
+                if not chunk_rows:
+                    continue
+
+                first_row = chunk_rows[0]
+                filename = first_row["filename"] or f"document_{doc_id}"
+                full_text = "\n\n".join(r["text"].strip() for r in chunk_rows if r["text"])
+                total_pages = max((r["page"] for r in chunk_rows if r["page"] is not None), default=None)
+
+                full_docs.append({
+                    "id": f"full_{doc_id}",
+                    "text": full_text,
+                    "metadata": {
+                        "document_id": doc_id,
+                        "filename": filename,
+                        "page": total_pages,
+                        "heading": "Toàn văn tài liệu",
+                        "chunk_index": 0,
+                    },
+                    "score": 1.0,
+                })
+
+            return full_docs
+        except Exception as e:
+            logger.error("Failed to fetch full documents from SQLite: %s", str(e), exc_info=True)
+            return []
+
     async def close(self) -> None:
         """Clean up resources."""
         if self._http_client and not self._http_client.is_closed:
