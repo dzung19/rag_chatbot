@@ -22,6 +22,7 @@ export async function* streamChat(
       temperature: params.temperature ?? 0.7,
       stream: params.stream ?? true,
       conversation_id: params.conversation_id,
+      request_id: params.request_id,
       skill_id: params.skill_id,
       modifier_skill_ids: params.modifier_skill_ids,
     }),
@@ -39,6 +40,7 @@ export async function* streamChat(
   let currentEventType = "";
   let currentDataParts: string[] = [];
 
+  let receivedDone = false;
   function parseEvent(): ChatEvent | null {
     if (!currentEventType || currentDataParts.length === 0) {
       return null;
@@ -65,6 +67,9 @@ export async function* streamChat(
         return { type: "token", data: dataStr };
       }
     } else if (eventType === "done") {
+      if (eventType === "done") {
+        receivedDone = true;
+      }
       return { type: "done" };
     } else if (eventType === "error") {
       return { type: "error", data: dataStr };
@@ -105,11 +110,20 @@ export async function* streamChat(
     // Flush remaining buffer if any
     const trailingEvent = parseEvent();
     if (trailingEvent) {
+      if (
+        trailingEvent.type === "done"
+      ) {
+        receivedDone = true;
+      }
+
       yield trailingEvent;
     }
 
-    // Always signal completion
-    yield { type: "done" };
+    if (!receivedDone) {
+      throw new Error(
+        "Chat stream ended without a done event.",
+      );
+    }
   } finally {
     reader.releaseLock();
   }

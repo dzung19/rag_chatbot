@@ -39,3 +39,4 @@ desktop.ini
 
 # Docker
 *.log
+qdrant_storage/

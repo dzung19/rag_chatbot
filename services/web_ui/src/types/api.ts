@@ -56,6 +56,7 @@ export interface ChatQueryParams {
   temperature?: number;
   stream?: boolean;
   conversation_id?: string;
+  request_id?:string;
   skill_id?: string;
   modifier_skill_ids?: string[];
 }

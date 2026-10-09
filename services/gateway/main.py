@@ -11,6 +11,11 @@ import logging
 import os
 import sys
 import uuid
+import json
+import codecs
+import json
+from dataclasses import dataclass
+from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
@@ -52,11 +57,13 @@ from shared import skills_repo
 setup_logging("gateway", os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     logger.info("Gateway started. CORS origins: %s", settings.cors_origins_list)
     yield
+
 
 app = FastAPI(
     title="RAG Chatbot API Gateway",
@@ -97,6 +104,112 @@ async def _get_client() -> httpx.AsyncClient:
 # ---------------------------------------------------------------------------
 # Chat Endpoints
 # ---------------------------------------------------------------------------
+@dataclass
+class SSEEvent:
+    event: str
+    data: Any
+    raw_data: str
+
+
+class SSEParser:
+    """Incremental SSE parser. Kết quả không phụ thuộc vào cách chia chunk."""
+
+    def __init__(self) -> None:
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._buffer = ""
+        self._event_type = ""
+        self._data_lines: list[str] = []
+
+    def feed(self, chunk: bytes) -> list[SSEEvent]:
+        text = self._decoder.decode(chunk)
+        return self._process_text(text, final=False)
+
+    def flush(self) -> list[SSEEvent]:
+        text = self._decoder.decode(b"", final=True)
+        events = self._process_text(text, final=True)
+
+        # Xử lý dòng cuối nếu stream không kết thúc bằng newline.
+        if self._buffer:
+            event = self._process_line(self._buffer)
+            self._buffer = ""
+            if event is not None:
+                events.append(event)
+
+        # Phát event cuối nếu thiếu dòng trống kết thúc.
+        event = self._dispatch()
+        if event is not None:
+            events.append(event)
+
+        return events
+
+    def _process_text(self, text: str, final: bool) -> list[SSEEvent]:
+        self._buffer += text
+
+        # Nếu chunk kết thúc bằng "\r", có thể "\n" nằm ở chunk sau.
+        held_cr = ""
+        if not final and self._buffer.endswith("\r"):
+            self._buffer = self._buffer[:-1]
+            held_cr = "\r"
+
+        normalized = self._buffer.replace("\r\n", "\n").replace("\r", "\n")
+
+        lines = normalized.split("\n")
+
+        # Phần cuối chưa có newline, giữ lại cho chunk sau.
+        self._buffer = lines.pop() + held_cr
+
+        events: list[SSEEvent] = []
+        for line in lines:
+            event = self._process_line(line)
+            if event is not None:
+                events.append(event)
+
+        return events
+
+    def _process_line(self, line: str) -> SSEEvent | None:
+        # Dòng trống kết thúc một event.
+        if line == "":
+            return self._dispatch()
+
+        # Dòng comment.
+        if line.startswith(":"):
+            return None
+
+        if ":" in line:
+            field, value = line.split(":", 1)
+            if value.startswith(" "):
+                value = value[1:]
+        else:
+            field, value = line, ""
+
+        if field == "event":
+            self._event_type = value
+        elif field == "data":
+            self._data_lines.append(value)
+
+        return None
+
+    def _dispatch(self) -> SSEEvent | None:
+        if not self._event_type and not self._data_lines:
+            return None
+
+        event_type = self._event_type or "message"
+        raw_data = "\n".join(self._data_lines)
+
+        self._event_type = ""
+        self._data_lines = []
+
+        try:
+            data: Any = json.loads(raw_data)
+        except json.JSONDecodeError:
+            data = raw_data
+
+        return SSEEvent(
+            event=event_type,
+            data=data,
+            raw_data=raw_data,
+        )
+
 
 @app.post("/api/v1/chat")
 async def chat_stream(
@@ -105,8 +218,11 @@ async def chat_stream(
 ):
     """Streaming chat endpoint — proxies to RAG engine via SSE and records conversation turns."""
     if detect_prompt_injection(request.query):
-        raise HTTPException(status_code=400, detail="Query rejected due to security policy (potential prompt injection).")
-        
+        raise HTTPException(
+            status_code=400,
+            detail="Query rejected due to security policy (potential prompt injection).",
+        )
+
     settings = get_settings()
     client = await _get_client()
 
@@ -134,13 +250,89 @@ async def chat_stream(
         except Exception as e:
             logger.warning("Failed to start turn in conversation service: %s", str(e))
 
-    try:
         # Forward to RAG engine streaming endpoint
         async def proxy_stream():
-            buffer = ""
-            accumulated_tokens = []
-            captured_sources = []
-            stream_failed = False
+            parser = SSEParser()
+
+            assistant_parts: list[str] = []
+            sources: list[dict] = []
+            received_done = False
+            
+            async def fail_turn(partial_content: str) -> None:
+                if not turn_id or not assistant_msg_id:
+                    return
+
+                try:
+                    fail_resp = await client.post(
+                        f"{settings.conversation_service_url}/internal/turns/{turn_id}/fail",
+                        headers={"x-internal-service-key": settings.internal_service_key or ""},
+                        json={
+                            "owner_id": current_user.user_id,
+                            "assistant_message_id": assistant_msg_id,
+                            "partial_content": partial_content,
+                        },
+                        timeout=5.0,
+                    )
+                    fail_resp.raise_for_status()
+                except httpx.HTTPError as error:
+                    logger.warning("Unable to mark chat turn as failed: %s", str(error))
+            
+            async def handle_event(event: SSEEvent) -> None:
+                nonlocal sources, received_done
+
+                if event.event == "token":
+                    # Giống client: nếu data không phải JSON string thì dùng raw text.
+                    token = (
+                        event.data if isinstance(event.data, str) else event.raw_data
+                    )
+                    assistant_parts.append(token)
+
+                elif event.event == "sources":
+                    if isinstance(event.data, list):
+                        sources = [
+                            item for item in event.data if isinstance(item, dict)
+                        ]
+
+                elif event.event == "done":
+                    received_done = True
+                    assistant_content = "".join(assistant_parts)
+
+                    logger.info(
+                        "RAG done. turn_id=%s content_length=%d",
+                        turn_id,
+                        len(assistant_content),
+                    )
+
+                    if not turn_id or not assistant_msg_id:
+                        return
+
+                    if not assistant_content.strip():
+                        logger.warning(
+                            "Skip complete because assistant content is empty. turn_id=%s",
+                            turn_id,
+                        )
+                        return
+
+                    try:
+                        complete_response = await client.post(
+                            f"{settings.conversation_service_url}/internal/turns/{turn_id}/complete",
+                            headers={
+                                "X-Internal-Service-Key": settings.internal_service_key,
+                            },
+                            json={
+                                "owner_id": current_user.user_id,
+                                "assistant_message_id": assistant_msg_id,
+                                "content": assistant_content,
+                                "sources": sources,
+                            },
+                            timeout=5.0,
+                        )
+                        complete_response.raise_for_status()
+                    except httpx.HTTPError as error:
+                        logger.warning(
+                            "Unable to complete chat history: %s", str(error)
+                        )
+
             try:
                 async with client.stream(
                     "POST",
@@ -149,65 +341,16 @@ async def chat_stream(
                 ) as response:
                     response.raise_for_status()
                     async for chunk in response.aiter_bytes():
+                        for event in parser.feed(chunk):
+                           await handle_event(event)
                         yield chunk
-                        buffer += chunk.decode("utf-8", errors="ignore")
-                        while "\n\n" in buffer:
-                            raw_event, buffer = buffer.split("\n\n", 1)
-                            lines = raw_event.strip().split("\n")
-                            event_type = None
-                            data_lines = []
-                            for line in lines:
-                                if line.startswith("event:"):
-                                    event_type = line.split(":", 1)[1].strip()
-                                elif line.startswith("data:"):
-                                    data_lines.append(line.split(":", 1)[1].strip())
-                            data_str = "\n".join(data_lines)
-                            if event_type == "sources" and data_str:
-                                try:
-                                    captured_sources = json.loads(data_str)
-                                except Exception:
-                                    pass
-                            elif event_type == "token" and data_str:
-                                try:
-                                    token_val = json.loads(data_str)
-                                    accumulated_tokens.append(token_val if isinstance(token_val, str) else data_str)
-                                except Exception:
-                                    accumulated_tokens.append(data_str)
-                            elif event_type == "error":
-                                stream_failed = True
+                    for event in parser.flush():
+                       await handle_event(event)
+                        
             except Exception as e:
-                stream_failed = True
                 logger.error("Chat stream error: %s", str(e))
+                await fail_turn("".join(assistant_parts))
                 raise
-            finally:
-                if turn_id and assistant_msg_id:
-                    full_content = "".join(accumulated_tokens)
-                    try:
-                        if stream_failed:
-                            await client.post(
-                                f"{settings.conversation_service_url}/internal/turns/{turn_id}/fail",
-                                json={
-                                    "owner_id": current_user.user_id,
-                                    "assistant_message_id": assistant_msg_id,
-                                    "partial_content": full_content,
-                                },
-                                headers={"x-internal-service-key": settings.internal_service_key or ""},
-                                timeout=10.0,
-                            )
-                        else:
-                            await client.post(
-                                f"{settings.conversation_service_url}/internal/turns/{turn_id}/complete",
-                                json={
-                                    "owner_id": current_user.user_id,
-                                    "assistant_message_id": assistant_msg_id,
-                                    "content": full_content,
-                                    "sources": captured_sources,
-                                },
-                                headers={"x-internal-service-key": settings.internal_service_key or ""},
-                                timeout=10.0,
-                            )
-                    except Exception as err:
-                        logger.warning("Failed to complete/fail turn: %s", str(err))
 
         return StreamingResponse(
             proxy_stream(),
@@ -218,11 +361,6 @@ async def chat_stream(
                 "X-Accel-Buffering": "no",
             },
         )
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="RAG engine service unavailable.")
-    except Exception as e:
-        logger.error("Chat stream error: %s", str(e))
-        raise HTTPException(status_code=500, detail="An error occurred.")
 
 
 @app.post("/api/v1/chat/sync", response_model=ChatResponse)
@@ -232,8 +370,11 @@ async def chat_sync(
 ):
     """Non-streaming chat endpoint with conversation persistence."""
     if detect_prompt_injection(request.query):
-        raise HTTPException(status_code=400, detail="Query rejected due to security policy (potential prompt injection).")
-        
+        raise HTTPException(
+            status_code=400,
+            detail="Query rejected due to security policy (potential prompt injection).",
+        )
+
     settings = get_settings()
     client = await _get_client()
 
@@ -271,7 +412,10 @@ async def chat_sync(
 
         if turn_id and assistant_msg_id:
             try:
-                sources_list = [s.model_dump() if hasattr(s, "model_dump") else s for s in data.get("sources", [])]
+                sources_list = [
+                    s.model_dump() if hasattr(s, "model_dump") else s
+                    for s in data.get("sources", [])
+                ]
                 await client.post(
                     f"{settings.conversation_service_url}/internal/turns/{turn_id}/complete",
                     json={
@@ -280,11 +424,15 @@ async def chat_sync(
                         "content": data.get("answer", ""),
                         "sources": sources_list,
                     },
-                    headers={"x-internal-service-key": settings.internal_service_key or ""},
+                    headers={
+                        "x-internal-service-key": settings.internal_service_key or ""
+                    },
                     timeout=10.0,
                 )
             except Exception as err:
-                logger.warning("Failed to complete turn in conversation service: %s", str(err))
+                logger.warning(
+                    "Failed to complete turn in conversation service: %s", str(err)
+                )
 
         return data
     except httpx.ConnectError:
@@ -297,7 +445,9 @@ async def chat_sync(
                         "assistant_message_id": assistant_msg_id,
                         "partial_content": "",
                     },
-                    headers={"x-internal-service-key": settings.internal_service_key or ""},
+                    headers={
+                        "x-internal-service-key": settings.internal_service_key or ""
+                    },
                     timeout=10.0,
                 )
             except Exception:
@@ -311,6 +461,7 @@ async def chat_sync(
 # ---------------------------------------------------------------------------
 # Conversation Endpoints
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/v1/conversations")
 async def list_conversations(
@@ -431,7 +582,12 @@ async def delete_conversation(
 # Skills Endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/api/v1/skills", response_model=SkillListResponse, dependencies=[Depends(get_current_user)])
+
+@app.get(
+    "/api/v1/skills",
+    response_model=SkillListResponse,
+    dependencies=[Depends(get_current_user)],
+)
 async def list_skills(type: str = None):
     """List all skills."""
     try:
@@ -444,7 +600,12 @@ async def list_skills(type: str = None):
         logger.error("List skills error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
 
-@app.get("/api/v1/skills/{skill_id}", response_model=Skill, dependencies=[Depends(get_current_user)])
+
+@app.get(
+    "/api/v1/skills/{skill_id}",
+    response_model=Skill,
+    dependencies=[Depends(get_current_user)],
+)
 async def get_skill(skill_id: str):
     """Get a skill by ID."""
     try:
@@ -458,7 +619,10 @@ async def get_skill(skill_id: str):
         logger.error("Get skill error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
 
-@app.post("/api/v1/skills", response_model=Skill, dependencies=[Depends(get_current_user)])
+
+@app.post(
+    "/api/v1/skills", response_model=Skill, dependencies=[Depends(get_current_user)]
+)
 async def create_skill(request: SkillCreateRequest):
     """Create a new custom skill."""
     try:
@@ -469,7 +633,12 @@ async def create_skill(request: SkillCreateRequest):
         logger.error("Create skill error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
 
-@app.put("/api/v1/skills/{skill_id}", response_model=Skill, dependencies=[Depends(get_current_user)])
+
+@app.put(
+    "/api/v1/skills/{skill_id}",
+    response_model=Skill,
+    dependencies=[Depends(get_current_user)],
+)
 async def update_skill(skill_id: str, request: SkillUpdateRequest):
     """Update a custom skill."""
     try:
@@ -483,6 +652,7 @@ async def update_skill(skill_id: str, request: SkillUpdateRequest):
     except Exception as e:
         logger.error("Update skill error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
+
 
 @app.delete("/api/v1/skills/{skill_id}", dependencies=[Depends(get_current_user)])
 async def delete_skill(skill_id: str):
@@ -505,6 +675,7 @@ async def delete_skill(skill_id: str):
 # Document Endpoints
 # ---------------------------------------------------------------------------
 
+
 @app.post("/api/v1/documents/upload", dependencies=[Depends(get_current_user)])
 async def upload_document(file: UploadFile = File(...)):
     """Upload a document for ingestion."""
@@ -514,7 +685,13 @@ async def upload_document(file: UploadFile = File(...)):
     try:
         # Read file content and forward to ingestion service
         content = await file.read()
-        files = {"file": (file.filename, content, file.content_type or "application/octet-stream")}
+        files = {
+            "file": (
+                file.filename,
+                content,
+                file.content_type or "application/octet-stream",
+            )
+        }
         response = await client.post(
             f"{settings.ingestion_service_url}/ingest/upload",
             files=files,
@@ -535,14 +712,20 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail="An error occurred.")
 
 
-@app.get("/api/v1/documents", response_model=DocumentListResponse, dependencies=[Depends(get_current_user)])
+@app.get(
+    "/api/v1/documents",
+    response_model=DocumentListResponse,
+    dependencies=[Depends(get_current_user)],
+)
 async def list_documents():
     """List all indexed documents."""
     settings = get_settings()
     client = await _get_client()
 
     try:
-        response = await client.get(f"{settings.ingestion_service_url}/ingest/documents")
+        response = await client.get(
+            f"{settings.ingestion_service_url}/ingest/documents"
+        )
         response.raise_for_status()
         return response.json()
     except httpx.ConnectError:
@@ -581,6 +764,7 @@ async def delete_document(document_id: str):
 # OneDrive/SharePoint Endpoints (Phase 2)
 # ---------------------------------------------------------------------------
 
+
 @app.post("/api/v1/onedrive/sync", dependencies=[Depends(get_current_user)])
 async def trigger_onedrive_sync():
     """Trigger a manual sync from OneDrive/SharePoint."""
@@ -592,7 +776,9 @@ async def trigger_onedrive_sync():
         response.raise_for_status()
         return response.json()
     except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="OneDrive Connector service unavailable.")
+        raise HTTPException(
+            status_code=503, detail="OneDrive Connector service unavailable."
+        )
     except httpx.HTTPStatusError as e:
         try:
             detail = e.response.json().get("detail", "Sync failed.")
@@ -603,6 +789,7 @@ async def trigger_onedrive_sync():
         logger.error("Sync trigger error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
 
+
 @app.get("/api/v1/onedrive/status", dependencies=[Depends(get_current_user)])
 async def onedrive_sync_status():
     """Get the status of the last sync operation."""
@@ -610,14 +797,19 @@ async def onedrive_sync_status():
     client = await _get_client()
 
     try:
-        response = await client.get(f"{settings.onedrive_connector_url}/onedrive/status")
+        response = await client.get(
+            f"{settings.onedrive_connector_url}/onedrive/status"
+        )
         response.raise_for_status()
         return response.json()
     except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="OneDrive Connector service unavailable.")
+        raise HTTPException(
+            status_code=503, detail="OneDrive Connector service unavailable."
+        )
     except Exception as e:
         logger.error("Sync status error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
+
 
 @app.get("/api/v1/onedrive/auth-url", dependencies=[Depends(get_current_user)])
 async def onedrive_auth_url():
@@ -626,14 +818,19 @@ async def onedrive_auth_url():
     client = await _get_client()
 
     try:
-        response = await client.get(f"{settings.onedrive_connector_url}/onedrive/auth-url")
+        response = await client.get(
+            f"{settings.onedrive_connector_url}/onedrive/auth-url"
+        )
         response.raise_for_status()
         return response.json()
     except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="OneDrive Connector service unavailable.")
+        raise HTTPException(
+            status_code=503, detail="OneDrive Connector service unavailable."
+        )
     except Exception as e:
         logger.error("Auth URL error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
+
 
 # Note: No API key validation on the callback because Microsoft redirects the user's browser directly here!
 @app.get("/api/v1/onedrive/callback")
@@ -648,27 +845,36 @@ async def onedrive_callback(request: Request):
         connector_url = f"{settings.onedrive_connector_url}/onedrive/callback"
         if query_string:
             connector_url = f"{connector_url}?{query_string}"
-            
+
         # Don't follow redirects, just return the redirect back to the user's browser
         response = await client.get(connector_url, follow_redirects=False)
-        
+
         from fastapi.responses import Response
+
         return Response(
             content=response.content,
             status_code=response.status_code,
-            headers=dict(response.headers)
+            headers=dict(response.headers),
         )
     except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="OneDrive Connector service unavailable.")
+        raise HTTPException(
+            status_code=503, detail="OneDrive Connector service unavailable."
+        )
     except Exception as e:
         logger.error("Auth callback error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
+
 
 # ---------------------------------------------------------------------------
 # Logs Endpoint (proxies to Loki)
 # ---------------------------------------------------------------------------
 
-@app.post("/api/v1/logs", response_model=LogQueryResponse, dependencies=[Depends(get_current_user)])
+
+@app.post(
+    "/api/v1/logs",
+    response_model=LogQueryResponse,
+    dependencies=[Depends(get_current_user)],
+)
 async def query_logs(request: LogQueryRequest):
     """Query application logs via Loki."""
     settings = get_settings()
@@ -680,7 +886,9 @@ async def query_logs(request: LogQueryRequest):
         if request.service:
             label_filters.append(f'container_name=~".*{request.service}.*"')
 
-        label_selector = "{" + ",".join(label_filters) + "}" if label_filters else '{job="docker"}'
+        label_selector = (
+            "{" + ",".join(label_filters) + "}" if label_filters else '{job="docker"}'
+        )
 
         line_filters = ""
         if request.level:
@@ -711,10 +919,12 @@ async def query_logs(request: LogQueryRequest):
             for value in stream.get("values", []):
                 if len(value) >= 2:
                     from datetime import datetime, timezone
+
                     timestamp = datetime.fromtimestamp(
                         int(value[0]) / 1e9, tz=timezone.utc
                     )
                     import json as json_mod
+
                     try:
                         log_data = json_mod.loads(value[1])
                         logs.append(
@@ -749,6 +959,7 @@ async def query_logs(request: LogQueryRequest):
 # ---------------------------------------------------------------------------
 # Health Endpoint
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/v1/health", response_model=HealthResponse)
 async def health_check():
