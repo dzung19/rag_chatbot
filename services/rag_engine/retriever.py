@@ -19,6 +19,7 @@ from shared.sqlite_db import get_sqlite_connection
 
 logger = logging.getLogger(__name__)
 
+_CHUNK_ID_PATTERN = re.compile(r"_chunk_(\d+)$")
 
 class Retriever:
     """Retrieves relevant document chunks from ChromaDB and SQLite FTS5."""
@@ -75,6 +76,7 @@ class Retriever:
         response.raise_for_status()
         data = response.json()
         return data["embeddings"][0]
+    
 
     async def _dense_search(
         self,
@@ -99,10 +101,20 @@ class Retriever:
             
             dense_results = []
             for point in q_results:
+                payload = point.payload or {}
+                document_id = payload.get("document_id", "")
+                chunk_index = payload.get("chunk_index")
+
+                # Cùng định dạng với cột id của SQLite để RRF gộp đúng chunk.
+                if document_id and chunk_index is not None:
+                    chunk_id = f"{document_id}_chunk_{chunk_index}"
+                else:
+                    chunk_id = str(point.id)
+
                 dense_results.append({
-                    "id": str(point.id),
-                    "text": point.payload.get("text", "") if point.payload else "",
-                    "metadata": point.payload or {},
+                    "id": chunk_id,
+                    "text": payload.get("text", ""),
+                    "metadata": payload,
                     "score": point.score,
                 })
                 
@@ -111,6 +123,11 @@ class Retriever:
             logger.error("Dense search failed: %s", str(e))
             return []
 
+    def _chunk_index_from_id(self, chunk_id: str) -> int | None:
+        """Lấy chunk_index từ ID dạng '<document_id>_chunk_<n>'."""
+        match = _CHUNK_ID_PATTERN.search(chunk_id or "")
+        return int(match.group(1)) if match else None
+    
     async def _keyword_search(self, query: str, top_k: int = 20) -> list[dict]:
         """Perform BM25 keyword search using SQLite FTS5 with word-level OR matching."""
         try:
@@ -159,6 +176,7 @@ class Retriever:
                             "filename": row["filename"],
                             "page": page_val,
                             "heading": heading_val,
+                            "chunk_index": self._chunk_index_from_id(row["id"]),
                         },
                         "score": round(score, 4),
                     }

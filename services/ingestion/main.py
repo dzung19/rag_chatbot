@@ -9,10 +9,12 @@ import logging
 import os
 import sys
 import uuid
+import hashlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from qdrant_client.models import Filter, FieldCondition, MatchValue
 
 from fastapi import (
     BackgroundTasks,
@@ -105,6 +107,7 @@ _ingestion_tasks: dict[str, IngestionStatus] = {}
 
 # Embedding client singleton
 _embed_client: Optional[EmbeddingClient] = None
+_hash_index: dict[str, str] = {}
 
 
 def _get_embed_client() -> EmbeddingClient:
@@ -149,19 +152,35 @@ def _get_qdrant_client():
 
 _qdrant_collection_checked = False
 
+def _compute_hash(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
 def _ensure_collection():
-    """Ensure Qdrant collection exists."""
+    """Ensure Qdrant collection and payload indexes exist."""
     global _qdrant_collection_checked
     if not _qdrant_collection_checked:
         client = _get_qdrant_client()
         settings = get_settings()
-        from qdrant_client.models import Distance, VectorParams
+        from qdrant_client.models import Distance, PayloadSchemaType, VectorParams
+
         if not client.collection_exists(settings.qdrant_collection):
             client.create_collection(
                 collection_name=settings.qdrant_collection,
                 vectors_config=VectorParams(size=768, distance=Distance.COSINE),
             )
+
+        for field in ("document_id", "content_hash"):
+            try:
+                client.create_payload_index(
+                    collection_name=settings.qdrant_collection,
+                    field_name=field,
+                    field_schema=PayloadSchemaType.KEYWORD,
+                )
+            except Exception:
+                pass  # Index đã tồn tại
+
         _qdrant_collection_checked = True
+
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +192,7 @@ async def _process_document(
     file_path: Path,
     original_filename: str,
     doc_type: DocumentType,
+    content_hash: str,
 ) -> None:
     """Background task: parse, chunk, embed, and store a document."""
     task_status = _ingestion_tasks.get(document_id)
@@ -235,6 +255,7 @@ async def _process_document(
                         "file_type": doc_type.value,
                         "ingested_at": ingested_at,
                         "text": chunk_texts[i],
+                        "content_hash": content_hash
                     }
                 )
             )
@@ -293,6 +314,8 @@ async def _process_document(
 
     except Exception as e:
         logger.error("Failed to ingest document %s: %s", document_id, str(e))
+        if _hash_index.get(content_hash) == document_id:
+            _hash_index.pop(content_hash, None)
         if task_status:
             task_status.status = IngestionStatusEnum.FAILED
             task_status.error_message = str(e)
@@ -310,6 +333,7 @@ def _reconstruct_documents_from_qdrant() -> None:
         # Qdrant scroll API to fetch all payload points
         offset = None
         doc_groups = {}
+        doc_hashes: dict[str, str] = {}
         
         while True:
             points, offset = client.scroll(
@@ -320,7 +344,7 @@ def _reconstruct_documents_from_qdrant() -> None:
                 offset=offset,
             )
             
-            for point in points[0]:
+            for point in points:
                 meta = point.payload
                 if not meta or "document_id" not in meta:
                     continue
@@ -328,6 +352,8 @@ def _reconstruct_documents_from_qdrant() -> None:
                 filename = meta.get("filename")
                 if doc_id and filename:
                     doc_groups[doc_id] = filename
+                    if meta.get("content_hash"):
+                        doc_hashes[doc_id] = meta["content_hash"]
                 
             if offset is None:
                 break
@@ -336,6 +362,31 @@ def _reconstruct_documents_from_qdrant() -> None:
         for doc_id, filename in doc_groups.items():
             ext = Path(filename).suffix.lower()
             file_path = UPLOAD_DIR / f"{doc_id}{ext}"
+            doc_filter = Filter(
+                must=[FieldCondition(key="document_id", match=MatchValue(value=doc_id))]
+            )
+
+            # Backfill hash cho tài liệu cũ chưa có
+            content_hash = doc_hashes.get(doc_id)
+            if not content_hash and file_path.exists():
+                content_hash = _compute_hash(file_path.read_bytes())
+                client.set_payload(
+                    collection_name=settings.qdrant_collection,
+                    payload={"content_hash": content_hash},
+                    points=doc_filter,
+                )
+
+            if content_hash:
+                if content_hash in _hash_index:
+                    logger.warning(
+                        "Duplicate document detected: %s ('%s') duplicates %s. "
+                        "Consider deleting it.",
+                        doc_id,
+                        filename,
+                        _hash_index[content_hash],
+                    )
+                else:
+                    _hash_index[content_hash] = doc_id
             size_bytes = 0
             created_at = datetime.now(timezone.utc)
             if file_path.exists():
@@ -347,7 +398,6 @@ def _reconstruct_documents_from_qdrant() -> None:
             # To be accurate we could issue a count query per doc_id.
             # But since we just need basic info, let's just create it with chunk_count=0
             # or do a count request
-            from qdrant_client.models import Filter, FieldCondition, MatchValue
             count_result = client.count(
                 collection_name=settings.qdrant_collection,
                 count_filter=Filter(
@@ -419,6 +469,24 @@ async def upload_document(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="File content does not match its extension. Possible file type mismatch.",
         )
+    
+    content_hash = _compute_hash(content)
+    existing_id = _hash_index.get(content_hash)
+    if existing_id:
+        existing = _documents.get(existing_id)
+        if existing and existing.status != IngestionStatusEnum.FAILED:
+            logger.info(
+                "Duplicate upload '%s' -> reuse document %s",
+                file.filename,
+                existing_id,
+            )
+            return DocumentUploadResponse(
+                document_id=existing_id,
+                filename=existing.filename,
+                status=existing.status,
+            )
+        # Bản cũ lỗi hoặc không còn: cho phép upload lại
+        _hash_index.pop(content_hash, None)
 
     # 4. Save with UUID filename (original name stored in metadata only)
     document_id = str(uuid.uuid4())
@@ -446,7 +514,7 @@ async def upload_document(
         created_at=datetime.now(timezone.utc),
     )
     _documents[document_id] = doc_info
-
+    _hash_index[content_hash] = document_id
     # 6. Create ingestion task tracker
     _ingestion_tasks[document_id] = IngestionStatus(
         document_id=document_id,
@@ -455,7 +523,7 @@ async def upload_document(
 
     # 7. Queue background processing
     background_tasks.add_task(
-        _process_document, document_id, file_path, file.filename, doc_type
+        _process_document, document_id, file_path, file.filename, doc_type, content_hash
     )
 
     return DocumentUploadResponse(
@@ -490,7 +558,6 @@ async def delete_document(document_id: str):
     try:
         client = _get_qdrant_client()
         settings = get_settings()
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
         
         client.delete(
             collection_name=settings.qdrant_collection,
@@ -524,6 +591,9 @@ async def delete_document(document_id: str):
         file_path.unlink()
 
     # Remove metadata
+    for h, d in list(_hash_index.items()):
+        if d == document_id:
+            del _hash_index[h]
     _documents.pop(document_id, None)
     _ingestion_tasks.pop(document_id, None)
 
