@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshCw, RotateCcw, Search } from "lucide-react";
-import { fetchDeletedConversations, restoreConversation } from "../api/mockAdminApi";
+import { fetchDeletedConversations, restoreConversation } from "../../../api/mockAdminApi";
 import { RestoreDialog } from "../components/RestoreDialog";
 import { useHasPermission } from "../permissions";
 import { RETENTION_DAYS, type DeletedConversation } from "../types";
-import { useAuthStore } from "../../../stores/authStore";
 import { useToastStore } from "../../../stores/toastStore";
 import styles from "../components/Admin.module.css";
 
@@ -17,7 +16,6 @@ const formatDate = (iso: string) => new Date(iso).toLocaleString("vi-VN");
 
 export function DeletedConversationsPage() {
   const canRestore = useHasPermission("conversation.restore");
-  const actorId = useAuthStore((s) => s.user?.id ?? "unknown-admin");
 
   const [items, setItems] = useState<DeletedConversation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -55,7 +53,7 @@ export function DeletedConversationsPage() {
     setSubmitting(true);
     setRestoreError(null);
     try {
-      await restoreConversation(target.id, reason, actorId);
+      await restoreConversation(target.id, reason);
       setItems((prev) => prev.filter((c) => c.id !== target.id));
       useToastStore.getState().pushToast(`Đã khôi phục "${target.title}"`, "success");
       setTarget(null);

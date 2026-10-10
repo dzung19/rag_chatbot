@@ -1,16 +1,50 @@
 import { useEffect, useState } from "react";
-import { fetchAuditLogs } from "../api/mockAdminApi";
+import { fetchAuditLogs } from "../../../api/mockAdminApi";
 import type { AuditLogEntry } from "../types";
 import styles from "../components/Admin.module.css";
 
 export function AuditLogPage() {
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
-
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     fetchAuditLogs()
       .then(setLogs)
       .finally(() => setLoading(false));
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const result = await fetchAuditLogs();
+
+        if (!cancelled) {
+          setLogs(result);
+        }
+      } catch (err: unknown) {
+        if (!cancelled) {
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Không tải được nhật ký quản trị.",
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void load();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (
@@ -25,6 +59,18 @@ export function AuditLogPage() {
       {loading && <p className={styles.muted}>Đang tải...</p>}
       {!loading && logs.length === 0 && (
         <div className={styles.empty}>Chưa có thao tác nào. Thử khôi phục một chat ở tab "Chat đã xóa".</div>
+      )}
+
+      {error && (
+        <p className={styles.errorText} role="alert">
+          {error}
+        </p>
+      )}
+
+      {!loading && !error && logs.length === 0 && (
+        <div className={styles.empty}>
+          Chưa có thao tác quản trị.
+        </div>
       )}
 
       {!loading && logs.length > 0 && (

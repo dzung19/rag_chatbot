@@ -4,6 +4,8 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from uuid import uuid4
+from sqlalchemy import update
+from .models import AdminAuditLog
 
 from sqlalchemy import (
     func,
@@ -455,3 +457,127 @@ def soft_delete_conversation(
         message.status = "cancelled"
 
     return True
+def admin_list_deleted(
+    session: Session,
+    *,
+    limit: int,
+    offset: int,
+    owner_id: str | None = None,
+) -> list[dict]:
+    message_count = (
+        select(func.count(Message.id))
+        .where(Message.conversation_id == Conversation.id)
+        .correlate(Conversation)
+        .scalar_subquery()
+    )
+
+    statement = (
+        select(
+            Conversation.id,
+            Conversation.title,
+            Conversation.owner_id,
+            Conversation.deleted_at,
+            message_count.label("message_count"),
+        )
+        .where(Conversation.deleted_at.is_not(None))
+        .order_by(
+            Conversation.deleted_at.desc(),
+            Conversation.id,
+        )
+        .limit(limit)
+        .offset(offset)
+    )
+
+    if owner_id:
+        statement = statement.where(
+            Conversation.owner_id == owner_id
+        )
+
+    return [
+        {
+            **dict(row),
+            "owner_name": row["owner_id"],
+        }
+        for row in session.execute(statement).mappings()
+    ]
+
+
+def admin_restore_conversation(
+    session: Session,
+    *,
+    conversation_id: str,
+    actor_id: str,
+    reason: str,
+) -> dict:
+    row = session.execute(
+        select(
+            Conversation.id,
+            Conversation.owner_id,
+            Conversation.title,
+            Conversation.deleted_at,
+        ).where(Conversation.id == conversation_id)
+    ).mappings().first()
+
+    if row is None:
+        raise LookupError("Conversation not found or permanently deleted.")
+
+    if row["deleted_at"] is None:
+        raise ValueError("Conversation is already active.")
+
+    # Kiểm tra lại trạng thái ngay trong UPDATE.
+    # Nếu chat bị purge hoặc restore đồng thời, không ghi audit thành công giả.
+    result = session.execute(
+        update(Conversation)
+        .where(
+            Conversation.id == conversation_id,
+            Conversation.deleted_at == row["deleted_at"],
+        )
+        .values(
+            deleted_at=None,
+            updated_at=utc_now(),
+        )
+        .execution_options(synchronize_session=False)
+    )
+
+    if result.rowcount != 1:
+        raise ValueError("Conversation changed. Refresh and try again.")
+
+    session.add(
+        AdminAuditLog(
+            id=str(uuid4()),
+            actor_id=actor_id,
+            action="conversation.restore",
+            target_id=conversation_id,
+            target_title=row["title"],
+            target_owner_id=row["owner_id"],
+            reason=reason,
+        )
+    )
+
+    # Flush không commit: router commit cả restore và audit cùng lúc.
+    session.flush()
+
+    return {
+        "id": conversation_id,
+        "owner_id": row["owner_id"],
+        "restored": True,
+    }
+
+
+def admin_list_audit(
+    session: Session,
+    *,
+    limit: int,
+    offset: int,
+) -> list[AdminAuditLog]:
+    return list(
+        session.scalars(
+            select(AdminAuditLog)
+            .order_by(
+                AdminAuditLog.created_at.desc(),
+                AdminAuditLog.id,
+            )
+            .limit(limit)
+            .offset(offset)
+        ).all()
+    )

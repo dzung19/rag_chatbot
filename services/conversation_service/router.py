@@ -35,6 +35,18 @@ from .schemas import (
     StartTurnRequest,
     StartTurnResponse,
 )
+from shared.admin_permissions import check_admin_id
+from shared.admin_schemas import (
+    AdminAuditEntry,
+    AdminDeletedConversation,
+    RestoreConversationRequest,
+    RestoreConversationResponse,
+)
+from .repository import (
+    admin_list_audit,
+    admin_list_deleted,
+    admin_restore_conversation,
+)
 
 
 DatabaseSession = Annotated[
@@ -384,3 +396,82 @@ def mark_turn_failed(
     except Exception:
         session.rollback()
         raise
+
+def verify_admin_actor(
+    x_admin_actor_id: Annotated[str, Header()],
+) -> str:
+    # Header này do Gateway đặt, không lấy từ body của browser.
+    check_admin_id(x_admin_actor_id)
+    return x_admin_actor_id
+
+
+AdminActor = Annotated[str, Depends(verify_admin_actor)]
+
+
+@internal_router.get(
+    "/admin/conversations/deleted",
+    response_model=list[AdminDeletedConversation],
+)
+def read_admin_deleted(
+    session: DatabaseSession,
+    actor_id: AdminActor,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    owner_id: str | None = Query(default=None, max_length=128),
+):
+    return admin_list_deleted(
+        session,
+        limit=limit,
+        offset=offset,
+        owner_id=owner_id,
+    )
+
+
+@internal_router.post(
+    "/admin/conversations/{conversation_id}/restore",
+    response_model=RestoreConversationResponse,
+)
+def restore_admin_conversation(
+    conversation_id: str,
+    request: RestoreConversationRequest,
+    session: DatabaseSession,
+    actor_id: AdminActor,
+):
+    try:
+        result = admin_restore_conversation(
+            session,
+            conversation_id=conversation_id,
+            actor_id=actor_id,
+            reason=request.reason,
+        )
+        session.commit()
+        return result
+
+    except LookupError as error:
+        session.rollback()
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    except ValueError as error:
+        session.rollback()
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+    except Exception:
+        session.rollback()
+        raise
+
+
+@internal_router.get(
+    "/admin/audit",
+    response_model=list[AdminAuditEntry],
+)
+def read_admin_audit(
+    session: DatabaseSession,
+    actor_id: AdminActor,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    return admin_list_audit(
+        session,
+        limit=limit,
+        offset=offset,
+    )

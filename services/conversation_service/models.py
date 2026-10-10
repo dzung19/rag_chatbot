@@ -309,3 +309,38 @@ class Message(Base):
             "turn_id",
         ),
     )
+    
+class AdminAuditLog(Base):
+    __tablename__ = "admin_audit_logs"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True,
+    )
+    actor_id: Mapped[str] = mapped_column(
+        String(128), nullable=False,
+    )
+    action: Mapped[str] = mapped_column(
+        String(80), nullable=False,
+    )
+    target_id: Mapped[str] = mapped_column(
+        String(36), nullable=False,
+    )
+    target_title: Mapped[str] = mapped_column(
+        String(200), nullable=False,
+    )
+    target_owner_id: Mapped[str] = mapped_column(
+        String(128), nullable=False,
+    )
+    reason: Mapped[str] = mapped_column(
+        Text, nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+
+    __table_args__ = (
+        Index("ix_admin_audit_created_at", "created_at"),
+        Index("ix_admin_audit_target_id", "target_id"),
+    )

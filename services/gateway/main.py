@@ -50,6 +50,10 @@ from shared.security import (
 )
 from shared import skills_repo
 
+from fastapi import Query
+from shared.admin_permissions import require_admin
+from shared.admin_schemas import RestoreConversationRequest
+
 # ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
@@ -577,6 +581,118 @@ async def delete_conversation(
         logger.error("Delete conversation error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
 
+
+async def _proxy_admin_request(
+    method: str,
+    path: str,
+    current_user: CurrentUser,
+    *,
+    params: dict | None = None,
+    body: dict | None = None,
+):
+    settings = get_settings()
+
+    if not settings.internal_service_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Internal credential is not configured.",
+        )
+
+    client = await _get_client()
+
+    try:
+        response = await client.request(
+            method,
+            f"{settings.conversation_service_url.rstrip('/')}/internal/admin{path}",
+            headers={
+                "X-Internal-Service-Key": settings.internal_service_key,
+                "X-Admin-Actor-Id": current_user.user_id,
+            },
+            params=params,
+            json=body,
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code >= 500:
+            raise HTTPException(
+                status_code=502,
+                detail="Conversation service failed.",
+            ) from error
+
+        try:
+            detail = error.response.json().get("detail", "Request rejected.")
+        except ValueError:
+            detail = "Request rejected."
+
+        raise HTTPException(
+            status_code=error.response.status_code,
+            detail=detail,
+        ) from error
+
+    except httpx.TimeoutException as error:
+        raise HTTPException(
+            status_code=504,
+            detail="Conversation service timed out.",
+        ) from error
+
+    except httpx.RequestError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Conversation service unavailable.",
+        ) from error
+
+
+@app.get("/api/v1/admin/conversations/deleted")
+async def admin_deleted_conversations(
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    owner_id: str | None = Query(default=None, max_length=128),
+    current_user: CurrentUser = Depends(require_admin),
+):
+    params = {"limit": limit, "offset": offset}
+    if owner_id:
+        params["owner_id"] = owner_id
+
+    return await _proxy_admin_request(
+        "GET",
+        "/conversations/deleted",
+        current_user,
+        params=params,
+    )
+
+# ---------------------------------------------------------------------------
+# Admin Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/v1/admin/conversations/{conversation_id}/restore")
+async def admin_restore(
+    conversation_id: str,
+    body: RestoreConversationRequest,
+    current_user: CurrentUser = Depends(require_admin),
+):
+    return await _proxy_admin_request(
+        "POST",
+        f"/conversations/{conversation_id}/restore",
+        current_user,
+        body=body.model_dump(),
+    )
+
+
+@app.get("/api/v1/admin/audit")
+async def admin_audit(
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    current_user: CurrentUser = Depends(require_admin),
+):
+    return await _proxy_admin_request(
+        "GET",
+        "/audit",
+        current_user,
+        params={"limit": limit, "offset": offset},
+    )
 
 # ---------------------------------------------------------------------------
 # Skills Endpoints
