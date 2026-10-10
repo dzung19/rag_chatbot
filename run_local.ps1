@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # RAG Chatbot - Local Non-Docker Startup Script (Windows PowerShell)
 # =============================================================================
 
@@ -16,7 +16,7 @@ if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
 Set-Location $ProjectRoot
 
 $PythonExe = Join-Path $ProjectRoot "venv\Scripts\python.exe"
-$ChromaExe = Join-Path $ProjectRoot "venv\Scripts\chroma.exe"
+# $ChromaExe = Join-Path $ProjectRoot "venv\Scripts\chroma.exe"
 $EnvFile = Join-Path $ProjectRoot ".env"
 
 # Runtime directories must not contain .env files. This prevents Chroma's
@@ -91,8 +91,8 @@ Get-Content $EnvFile | ForEach-Object {
 }
 
 # Stop existing processes on target ports.
-Write-Host "Checking and stopping existing services on ports 8000, 8001, 8002, 8003, 8004, 3000..." -ForegroundColor Cyan
-$Ports = @(8000, 8001, 8002, 8003, 8004, 8005, 3000)
+Write-Host "Checking and stopping existing services on ports 8000, 8001, 8002, 8004, 3000..." -ForegroundColor Cyan
+$Ports = @(8000, 8001, 8002, 8004, 8005, 3000)
 
 foreach ($Port in $Ports) {
     $Connections = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
@@ -171,9 +171,9 @@ New-Item -ItemType Directory -Path $ChromaData -Force | Out-Null
 New-Item -ItemType Directory -Path $SharedData -Force | Out-Null
 
 # ChromaDB
-Write-Host "-> Launching ChromaDB on http://127.0.0.1:8003" -ForegroundColor Green
-$ChromaCommand = "title ChromaDB && `"$ChromaExe`" run --host 127.0.0.1 --port 8003 --path `"$ChromaData`""
-Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $ChromaCommand -WorkingDirectory $ChromaRuntime
+# Write-Host "-> Launching ChromaDB on http://127.0.0.1:8003" -ForegroundColor Green
+# $ChromaCommand = "title ChromaDB && `"$ChromaExe`" run --host 127.0.0.1 --port 8003 --path `"$ChromaData`""
+# Start-Process -FilePath "cmd.exe" -ArgumentList "/k", $ChromaCommand -WorkingDirectory $ChromaRuntime
 
 # Ingestion
 Write-Host "-> Launching Ingestion Service on http://127.0.0.1:8001" -ForegroundColor Green
