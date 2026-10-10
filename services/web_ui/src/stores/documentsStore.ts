@@ -10,17 +10,29 @@ import {
 } from "../api/endpoints";
 import { useToastStore } from "./toastStore";
 
+const DOCUMENT_POLL_INTERVAL_MS = 5000;
+
+let documentPollTimer: ReturnType<typeof setTimeout> | null = null;
+let documentsFetchInFlight: Promise<void> | null = null;
+
+function hasProcessingDocuments(documents: DocumentInfo[]): boolean {
+  return documents.some((document) =>
+    ["pending", "processing"].includes(document.status),
+  );
+}
+
 interface DocumentsState {
   documents: DocumentInfo[];
   isLoading: boolean;
   isSyncing: boolean;
   uploads: UploadProgressItem[];
 
-  fetchDocuments: () => Promise<void>;
+  fetchDocuments: (silent?: boolean) => Promise<void>;
   uploadFiles: (files: File[]) => Promise<void>;
   deleteDocument: (id: string) => Promise<void>;
   syncSharePoint: () => Promise<void>;
 }
+
 
 export const useDocumentsStore = create<DocumentsState>()((set, get) => ({
   documents: [],
@@ -28,16 +40,60 @@ export const useDocumentsStore = create<DocumentsState>()((set, get) => ({
   isSyncing: false,
   uploads: [],
 
-  fetchDocuments: async () => {
-    set({ isLoading: true });
-    try {
-      const data = await fetchDocuments();
-      set({ documents: data.documents || [], isLoading: false });
-    } catch (err: unknown) {
-      set({ documents: [], isLoading: false });
-      const msg = err instanceof Error ? err.message : "Failed to load documents";
-      useToastStore.getState().pushToast(msg, "error");
+  fetchDocuments: async (silent = false) => {
+    // Các nơi gọi đồng thời dùng chung request đang chạy.
+    if (documentsFetchInFlight) {
+      return documentsFetchInFlight;
     }
+
+    // Hủy lịch cũ nếu người dùng chủ động tải lại danh sách.
+    if (documentPollTimer !== null) {
+      clearTimeout(documentPollTimer);
+      documentPollTimer = null;
+    }
+
+    if (!silent) {
+      set({ isLoading: true });
+    }
+
+    documentsFetchInFlight = (async () => {
+      try {
+        const data = await fetchDocuments();
+
+        set({
+          documents: data.documents || [],
+        });
+      } catch (err: unknown) {
+        const message =
+          err instanceof Error
+            ? err.message
+            : "Failed to load documents";
+
+        // Giữ danh sách hiện tại khi API lỗi.
+        // Không xóa documents: [] như code cũ.
+        if (silent) {
+          console.warn("Failed to refresh documents:", message);
+        } else {
+          useToastStore.getState().pushToast(message, "error");
+        }
+      } finally {
+        if (!silent) {
+          set({ isLoading: false });
+        }
+      }
+    })().finally(() => {
+      documentsFetchInFlight = null;
+
+      // Chỉ tiếp tục polling khi còn tài liệu đang xử lý.
+      if (hasProcessingDocuments(get().documents)) {
+        documentPollTimer = setTimeout(() => {
+          documentPollTimer = null;
+          void get().fetchDocuments(true);
+        }, DOCUMENT_POLL_INTERVAL_MS);
+      }
+    });
+
+    return documentsFetchInFlight;
   },
 
   uploadFiles: async (files: File[]) => {
