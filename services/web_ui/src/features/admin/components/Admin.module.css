@@ -1,0 +1,73 @@
+.layout { display: flex; flex-direction: column; min-height: 100vh; background: #f8fafc; }
+.header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 24px; background: #7c2d12; color: #fff;
+}
+.headerTitle { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 16px; }
+.backButton {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
+  border: 1px solid rgb(255 255 255 / 40%); border-radius: 8px; background: transparent; color: #fff; cursor: pointer;
+}
+.backButton:hover { background: rgb(255 255 255 / 12%); }
+
+.tabs { display: flex; gap: 4px; padding: 0 24px; background: #fff; border-bottom: 1px solid #e2e8f0; }
+.navLink {
+  display: inline-flex; align-items: center; gap: 6px; padding: 12px 14px;
+  color: #475569; text-decoration: none; border-bottom: 2px solid transparent;
+}
+.navLinkActive { color: #7c2d12; border-bottom-color: #7c2d12; font-weight: 600; }
+.content { padding: 24px; max-width: 1200px; width: 100%; margin: 0 auto; box-sizing: border-box; }
+
+.pageHeader { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+.pageHeader h2 { margin: 0 0 4px; font-size: 20px; }
+.muted { margin: 0; color: #64748b; font-size: 14px; }
+
+.searchBox {
+  display: flex; align-items: center; gap: 8px; max-width: 360px; margin-bottom: 16px;
+  padding: 8px 12px; background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; color: #64748b;
+}
+.searchBox input { flex: 1; border: 0; outline: none; font: inherit; background: transparent; }
+
+.tableWrapper { overflow-x: auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; }
+.table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.table th, .table td { padding: 12px 14px; text-align: left; border-bottom: 1px solid #f1f5f9; }
+.table th { background: #f8fafc; color: #475569; font-weight: 600; white-space: nowrap; }
+.table tbody tr:hover { background: #fafafa; }
+.titleCell { font-weight: 500; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.actionCell { text-align: right; white-space: nowrap; }
+
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #f1f5f9; color: #334155; font-size: 12px; }
+.badgeDanger { background: #fee2e2; color: #b91c1c; font-weight: 600; }
+
+.empty { padding: 40px; text-align: center; color: #64748b; background: #fff; border: 1px dashed #cbd5e1; border-radius: 12px; }
+
+.primaryButton, .secondaryButton, .linkButton {
+  display: inline-flex; align-items: center; gap: 6px; font: inherit; cursor: pointer; border-radius: 8px;
+}
+.primaryButton { padding: 8px 16px; border: 0; background: #7c2d12; color: #fff; }
+.primaryButton:disabled { opacity: 0.5; cursor: not-allowed; }
+.secondaryButton { padding: 8px 14px; border: 1px solid #cbd5e1; background: #fff; color: #0f172a; }
+.secondaryButton:disabled { opacity: 0.6; cursor: not-allowed; }
+.linkButton { padding: 4px 8px; border: 0; background: transparent; color: #7c2d12; font-weight: 500; }
+.linkButton:hover { background: #fff7ed; }
+
+.backdrop {
+  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgb(15 23 42 / 45%); z-index: 1000;
+}
+.dialog { width: min(480px, calc(100% - 32px)); padding: 24px; background: #fff; border-radius: 14px; box-shadow: 0 20px 40px rgb(0 0 0 / 20%); }
+.dialog h3 { margin: 0 0 8px; }
+.dialogInfo { margin: 0 0 16px; color: #334155; }
+.label { display: block; margin-bottom: 6px; font-weight: 500; }
+.required { color: #b91c1c; }
+.textarea {
+  width: 100%; box-sizing: border-box; padding: 10px 12px; font: inherit; resize: vertical;
+  border: 1px solid #cbd5e1; border-radius: 8px; outline: none;
+}
+.textarea:focus { border-color: #7c2d12; box-shadow: 0 0 0 3px rgb(124 45 18 / 15%); }
+.hint { margin: 6px 0 0; color: #64748b; font-size: 12px; }
+.errorText { margin: 12px 0 0; color: #b91c1c; font-size: 14px; }
+.dialogActions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+
+.forbidden { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 80px 24px; color: #64748b; text-align: center; }
+.forbidden h2 { margin: 0; color: #0f172a; }

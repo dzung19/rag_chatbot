@@ -16,6 +16,7 @@ import { useUiStore } from "../../stores/uiStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useHealthStore } from "../../stores/healthStore";
 import styles from "./Sidebar.module.css";
+import { AdminNavItem } from "../../features/admin";
 
 export const Sidebar: React.FC = () => {
   const navigate = useNavigate();
@@ -194,6 +195,8 @@ export const Sidebar: React.FC = () => {
           <Activity size={18} />
           {!sidebarCollapsed && <span>Logs</span>}
         </NavLink>
+
+        <AdminNavItem className={styles.navItem} />
 
         <NavLink
           to="/settings"
