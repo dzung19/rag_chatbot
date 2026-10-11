@@ -174,6 +174,7 @@ export const useChatStore = create<ChatState>()(
               updatedAt: detail.updated_at
                 ? new Date(detail.updated_at).getTime()
                 : (prev?.updatedAt ?? Date.now()),
+              selectedDocumentIds: prev?.selectedDocumentIds,
             };
 
             const nextOrder = s.order.includes(id) ? s.order : [id, ...s.order];
@@ -378,6 +379,12 @@ export const useChatStore = create<ChatState>()(
         let isFirstMessage = false;
         let nextTitle = "";
 
+        const currentConv = activeId ? get().conversations[activeId] : null;
+        let selectedDocIds = [...uploadedDocumentIds];
+        if (selectedDocIds.length === 0 && currentConv?.selectedDocumentIds) {
+          selectedDocIds = [...currentConv.selectedDocumentIds];
+        }
+
         set((state) => {
           const conv = state.conversations[activeId!];
           isFirstMessage = conv.messages.filter((m) => m.role === "user").length === 0;
@@ -390,6 +397,7 @@ export const useChatStore = create<ChatState>()(
               [activeId!]: {
                 ...conv,
                 title: nextTitle,
+                selectedDocumentIds: selectedDocIds.length > 0 ? selectedDocIds : conv.selectedDocumentIds,
                 messages: [...conv.messages, userMsg, assistantMsg],
                 updatedAt: Date.now(),
               },
@@ -414,7 +422,7 @@ export const useChatStore = create<ChatState>()(
               conversation_id: activeId,
               skill_id: activeMainSkillId,
               modifier_skill_ids: activeModifierSkillIds,
-              selected_document_ids: uploadedDocumentIds,
+              selected_document_ids: selectedDocIds,
             },
             activeAbortController.signal
           );

@@ -872,7 +872,30 @@ async def delete_document(document_id: str):
             detail = "Delete failed."
         raise HTTPException(status_code=e.response.status_code, detail=detail)
     except Exception as e:
-        logger.error("Delete document error: %s", str(e))
+        raise HTTPException(status_code=500, detail="An error occurred.")
+
+
+@app.get(
+    "/api/v1/documents/{document_id}/status",
+    dependencies=[Depends(get_current_user)],
+)
+async def get_document_status(document_id: str):
+    """Get the ingestion status of a document."""
+    settings = get_settings()
+    client = await _get_client()
+
+    try:
+        response = await client.get(
+            f"{settings.ingestion_service_url}/ingest/documents/{document_id}/status"
+        )
+        response.raise_for_status()
+        return response.json()
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail="Ingestion service unavailable.")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail="Document status not found.")
+    except Exception as e:
+        logger.error("Get document status error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")
 
 

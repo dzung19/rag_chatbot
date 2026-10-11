@@ -11,11 +11,23 @@ import logging
 import os
 import secrets
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
 logger = logging.getLogger(__name__)
+
+
+def _default_sqlite_db_path() -> str:
+    env_path = os.environ.get("SQLITE_DB_PATH")
+    if env_path:
+        return env_path
+    if os.name != "nt" and Path("/app/shared_data").exists():
+        return "/app/shared_data/rag_hybrid.db"
+    workspace_shared = Path(__file__).resolve().parent.parent / "shared_data"
+    workspace_shared.mkdir(parents=True, exist_ok=True)
+    return str(workspace_shared / "rag_hybrid.db")
 
 
 def _resolve_secret(env_key: str, file_path: str | None = None) -> str:
@@ -76,7 +88,7 @@ class Settings(BaseSettings):
     chunk_size: int = Field(default=1000, ge=100, le=5000)
     chunk_overlap: int = Field(default=200, ge=0, le=1000)
     max_upload_size_mb: int = Field(default=50, ge=1, le=200)
-    sqlite_db_path: str = Field(default="/app/shared_data/rag_hybrid.db")
+    sqlite_db_path: str = Field(default_factory=_default_sqlite_db_path)
 
     # --- Downstream Service URLs ---
     ingestion_service_url: str = Field(default="http://localhost:8001")

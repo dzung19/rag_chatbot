@@ -11,7 +11,7 @@ import { MAX_INPUT_CHARS, MAX_CHAT_FILES } from "../../lib/constants";
 import styles from "./Composer.module.css";
 
 export const Composer: React.FC = () => {
-  const { sendMessage, isStreaming, stopStreaming } = useChatStore();
+  const { sendMessage, isStreaming, stopStreaming, activeId, conversations } = useChatStore();
   const { pushToast } = useToastStore();
   const { activeMainSkillId } = useSkillStore();
 
@@ -19,6 +19,11 @@ export const Composer: React.FC = () => {
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [showCompareDialog, setShowCompareDialog] = useState(false);
+
+  const activeConv = activeId ? conversations[activeId] : null;
+  const conversationHas2Files = activeConv?.selectedDocumentIds?.length === 2;
+  const hasValidFilesForCompare =
+    attachedFiles.length === 2 || (attachedFiles.length === 0 && conversationHas2Files);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -62,7 +67,7 @@ export const Composer: React.FC = () => {
     const trimmed = input.trim();
     if (!trimmed || isStreaming) return;
 
-    if (activeMainSkillId === "business-compare" && attachedFiles.length !== 2) {
+    if (activeMainSkillId === "business-compare" && !hasValidFilesForCompare) {
       setShowCompareDialog(true);
       return;
     }
@@ -115,7 +120,7 @@ export const Composer: React.FC = () => {
         {activeMainSkillId === "business-compare" && (
           <div
             className={`${styles.compareNotice} ${
-              attachedFiles.length !== 2 ? styles.invalid : ""
+              !hasValidFilesForCompare ? styles.invalid : ""
             }`}
             onClick={() => setShowCompareDialog(true)}
             role="button"
@@ -124,16 +129,20 @@ export const Composer: React.FC = () => {
           >
             <GitCompare size={14} />
             <span>
-              So sánh Nghiệp vụ: Cần chính xác 2 file ({attachedFiles.length}/2)
+              {attachedFiles.length === 2
+                ? "So sánh Nghiệp vụ: Đã đính kèm 2 file"
+                : conversationHas2Files
+                ? "So sánh Nghiệp vụ: Đang đối chiếu 2 file trong hội thoại"
+                : `So sánh Nghiệp vụ: Cần chính xác 2 file (${attachedFiles.length}/2)`}
             </span>
-            {attachedFiles.length !== 2 ? (
+            {!hasValidFilesForCompare ? (
               <span className={styles.noticeAlert}>Chưa đủ 2 file</span>
             ) : (
               <span
                 className={styles.noticeAlert}
                 style={{ color: "var(--badge-green-text)" }}
               >
-                ✓ Đã đủ 2 file
+                ✓ Hợp lệ (Bypass RAG)
               </span>
             )}
           </div>

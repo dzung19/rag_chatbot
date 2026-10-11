@@ -42,7 +42,11 @@ from shared.models import (
     ServiceHealth,
 )
 from shared.security import SecurityHeadersMiddleware
-from shared.sqlite_db import get_sqlite_connection
+from shared.sqlite_db import (
+    get_sqlite_connection,
+    save_document_full_and_chunks,
+    delete_document_from_sqlite,
+)
 
 from document_parser import parse_document
 from chunker import chunk_text, chunk_document_pages
@@ -269,32 +273,20 @@ async def _process_document(
                 points=points[b_slice]
             )
 
-        # 4.5. Store in SQLite FTS5 for Hybrid Search
+        # 4.5. Ensure SQLite has both full_documents and document_chunks
         try:
-            sqlite_conn = get_sqlite_connection()
-            # Delete old chunks if re-ingesting
-            sqlite_conn.execute("DELETE FROM document_chunks WHERE document_id = ?", (document_id,))
-            
-            sqlite_data = [
-                (
-                    f"{document_id}_chunk_{c['chunk_index']}", 
-                    document_id, 
-                    original_filename, 
-                    c.get("page", 0),
-                    c.get("heading", ""),
-                    c["text"]
-                )
-                for c in chunks
-            ]
-            sqlite_conn.executemany(
-                "INSERT INTO document_chunks (id, document_id, filename, page, heading, text) VALUES (?, ?, ?, ?, ?, ?)",
-                sqlite_data
+            full_text = "\n\n".join(p.strip() for p in text_pages if p and p.strip())
+            save_document_full_and_chunks(
+                document_id=document_id,
+                filename=original_filename,
+                full_text=full_text,
+                page_count=len(text_pages),
+                file_size_bytes=file_path.stat().st_size if file_path.exists() else 0,
+                file_type=doc_type.value,
+                chunks=chunks,
             )
-            sqlite_conn.commit()
-            sqlite_conn.close()
         except Exception as sqlite_err:
-            logger.error("Failed to insert into SQLite FTS5: %s", str(sqlite_err))
-            # Continue even if SQLite fails so ChromaDB ingestion completes
+            logger.error("Failed to insert into SQLite: %s", str(sqlite_err))
 
         # 5. Update status
         if task_status:
@@ -475,17 +467,22 @@ async def upload_document(
     if existing_id:
         existing = _documents.get(existing_id)
         if existing and existing.status != IngestionStatusEnum.FAILED:
-            logger.info(
-                "Duplicate upload '%s' -> reuse document %s",
-                file.filename,
-                existing_id,
-            )
-            return DocumentUploadResponse(
-                document_id=existing_id,
-                filename=existing.filename,
-                status=existing.status,
-            )
-        # Bản cũ lỗi hoặc không còn: cho phép upload lại
+            conn = get_sqlite_connection()
+            cur = conn.execute("SELECT 1 FROM full_documents WHERE document_id = ?", (existing_id,))
+            in_sqlite = cur.fetchone() is not None
+            conn.close()
+            if in_sqlite:
+                logger.info(
+                    "Duplicate upload '%s' -> reuse document %s (verified in SQLite)",
+                    file.filename,
+                    existing_id,
+                )
+                return DocumentUploadResponse(
+                    document_id=existing_id,
+                    filename=existing.filename,
+                    status=existing.status,
+                )
+        # Bản cũ lỗi hoặc chưa có trong SQLite: cho phép upload lại
         _hash_index.pop(content_hash, None)
 
     # 4. Save with UUID filename (original name stored in metadata only)
@@ -496,11 +493,42 @@ async def upload_document(
     with open(file_path, "wb") as f:
         f.write(content)
 
+    # 4.1 Parse text and commit to SQLite immediately (instant availability for comparison & search)
+    try:
+        text_pages = list(parse_document(str(file_path), doc_type.value))
+        if not text_pages:
+            raise ValueError("No text extracted from document.")
+        full_text = "\n\n".join(p.strip() for p in text_pages if p and p.strip())
+        chunks = chunk_document_pages(
+            pages=text_pages,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+            source_filename=file.filename,
+        )
+        save_document_full_and_chunks(
+            document_id=document_id,
+            filename=file.filename,
+            full_text=full_text,
+            page_count=len(text_pages),
+            file_size_bytes=len(content),
+            file_type=doc_type.value,
+            chunks=chunks,
+        )
+    except Exception as e:
+        logger.error("Failed to extract and store document text for %s: %s", document_id, str(e), exc_info=True)
+        file_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot extract text from file: {str(e)}",
+        )
+
     logger.info(
-        "File uploaded: %s → %s (%d bytes)",
+        "File uploaded and text saved to SQLite: %s → %s (%d bytes, %d pages, %d chunks)",
         file.filename,
         safe_filename,
         len(content),
+        len(text_pages),
+        len(chunks),
     )
 
     # 5. Create metadata record
@@ -509,19 +537,22 @@ async def upload_document(
         filename=file.filename,
         file_type=doc_type,
         file_size_bytes=len(content),
-        chunk_count=0,
-        status=IngestionStatusEnum.PENDING,
+        chunk_count=len(chunks),
+        status=IngestionStatusEnum.PROCESSING,
         created_at=datetime.now(timezone.utc),
     )
     _documents[document_id] = doc_info
     _hash_index[content_hash] = document_id
+
     # 6. Create ingestion task tracker
     _ingestion_tasks[document_id] = IngestionStatus(
         document_id=document_id,
-        status=IngestionStatusEnum.PENDING,
+        status=IngestionStatusEnum.PROCESSING,
+        total_chunks=len(chunks),
+        chunks_processed=0,
     )
 
-    # 7. Queue background processing
+    # 7. Queue background processing (embeddings and Qdrant vector indexing)
     background_tasks.add_task(
         _process_document, document_id, file_path, file.filename, doc_type, content_hash
     )
@@ -529,7 +560,7 @@ async def upload_document(
     return DocumentUploadResponse(
         document_id=document_id,
         filename=file.filename,
-        status=IngestionStatusEnum.PENDING,
+        status=IngestionStatusEnum.PROCESSING,
     )
 
 
@@ -574,14 +605,11 @@ async def delete_document(document_id: str):
     except Exception as e:
         logger.error("Failed to delete from Qdrant: %s", str(e))
 
-    # Remove from SQLite FTS5
+    # Remove from SQLite (full_documents and document_chunks)
     try:
-        sqlite_conn = get_sqlite_connection()
-        sqlite_conn.execute("DELETE FROM document_chunks WHERE document_id = ?", (document_id,))
-        sqlite_conn.commit()
-        sqlite_conn.close()
+        delete_document_from_sqlite(document_id)
     except Exception as e:
-        logger.error("Failed to delete from SQLite FTS5: %s", str(e))
+        logger.error("Failed to delete from SQLite: %s", str(e))
 
     # Remove uploaded file
     doc_info = _documents[document_id]

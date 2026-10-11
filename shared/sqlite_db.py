@@ -2,7 +2,7 @@ import logging
 import sqlite3
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 from shared.config import get_settings
 
@@ -39,7 +39,25 @@ def _init_db(conn: sqlite3.Connection) -> None:
     """)
     conn.commit()
     
+    _init_full_documents_table(conn)
     _init_skills_table(conn)
+
+
+def _init_full_documents_table(conn: sqlite3.Connection) -> None:
+    """Initialize full_documents table for clean, unchunked full-text document storage."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS full_documents (
+            document_id TEXT PRIMARY KEY,
+            filename TEXT NOT NULL,
+            full_text TEXT NOT NULL,
+            page_count INTEGER NOT NULL DEFAULT 1,
+            file_size_bytes INTEGER NOT NULL DEFAULT 0,
+            file_type TEXT NOT NULL DEFAULT 'txt',
+            created_at TEXT NOT NULL
+        );
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_full_docs_id ON full_documents(document_id);")
+    conn.commit()
 
 def _init_skills_table(conn: sqlite3.Connection) -> None:
     """Initialize skills table and seed base skills."""
@@ -166,3 +184,58 @@ def get_sqlite_connection() -> sqlite3.Connection:
     _init_db(conn)
     
     return conn
+
+
+def save_document_full_and_chunks(
+    document_id: str,
+    filename: str,
+    full_text: str,
+    page_count: int,
+    file_size_bytes: int,
+    file_type: str,
+    chunks: list[dict],
+) -> None:
+    """Save full document text and chunked representations to SQLite in a single transaction."""
+    conn = get_sqlite_connection()
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO full_documents (
+                document_id, filename, full_text, page_count, file_size_bytes, file_type, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (document_id, filename, full_text, page_count, file_size_bytes, file_type, now),
+        )
+
+        conn.execute("DELETE FROM document_chunks WHERE document_id = ?", (document_id,))
+        sqlite_data = [
+            (
+                f"{document_id}_chunk_{c['chunk_index']}",
+                document_id,
+                filename,
+                c.get("page", 0),
+                c.get("heading", ""),
+                c["text"],
+            )
+            for c in chunks
+        ]
+        if sqlite_data:
+            conn.executemany(
+                "INSERT INTO document_chunks (id, document_id, filename, page, heading, text) VALUES (?, ?, ?, ?, ?, ?)",
+                sqlite_data,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_document_from_sqlite(document_id: str) -> None:
+    """Delete document from both full_documents and document_chunks tables."""
+    conn = get_sqlite_connection()
+    try:
+        conn.execute("DELETE FROM full_documents WHERE document_id = ?", (document_id,))
+        conn.execute("DELETE FROM document_chunks WHERE document_id = ?", (document_id,))
+        conn.commit()
+    finally:
+        conn.close()

@@ -7,6 +7,7 @@ Pipeline: Query → Preprocess → Parallel Hybrid Search (Vector + BM25) → RR
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -208,19 +209,46 @@ async def query_sync(
 
         # 1. Retrieve relevant context (bypassing vector search if business-compare)
         retriever = _get_retriever()
-        if request.skill_id == "business-compare" and request.selected_document_ids:
+        if request.skill_id == "business-compare":
+            if not request.selected_document_ids or len(request.selected_document_ids) != 2:
+                logger.warning(
+                    "Skill 'business-compare' requires exactly 2 documents, but got %d: %s",
+                    len(request.selected_document_ids) if request.selected_document_ids else 0,
+                    request.selected_document_ids,
+                )
+                return ChatResponse(
+                    answer="Chế độ So sánh Nghiệp vụ yêu cầu chính xác 2 tài liệu để đối chiếu. Vui lòng đính kèm đủ 2 file.",
+                    sources=[],
+                    query=request.query,
+                    model=settings.ollama_model,
+                    processing_time_ms=round((time.perf_counter() - start_time) * 1000, 1),
+                )
+
             logger.info(
-                "Skill 'business-compare' active with %d documents: %s. Fetching full documents (bypassing RAG).",
-                len(request.selected_document_ids),
+                "Skill 'business-compare' active with 2 documents: %s. Fetching full documents (bypassing RAG).",
                 request.selected_document_ids,
             )
             results = retriever.get_full_documents(request.selected_document_ids)
-            if not results:
+            if len(results) < 2:
+                for _ in range(3):
+                    await asyncio.sleep(0.5)
+                    results = retriever.get_full_documents(request.selected_document_ids)
+                    if len(results) == 2:
+                        break
+
+            if len(results) < 2:
                 logger.warning(
-                    "No full documents found in SQLite for IDs %s. Falling back to hybrid search.",
+                    "Could not load full documents for IDs %s (found %d/2).",
                     request.selected_document_ids,
+                    len(results),
                 )
-                results = await retriever.search(request.query, top_k=top_k)
+                return ChatResponse(
+                    answer=f"Không thể tải đủ nội dung 2 tài liệu để đối chiếu (tìm thấy {len(results)}/2 tài liệu). Vui lòng kiểm tra lại tài liệu và thử lại.",
+                    sources=[],
+                    query=request.query,
+                    model=settings.ollama_model,
+                    processing_time_ms=round((time.perf_counter() - start_time) * 1000, 1),
+                )
         else:
             results = await retriever.search(request.query, top_k=top_k)
 
@@ -310,19 +338,42 @@ async def query_stream(request: ChatRequest):
 
             # 1. Retrieve context (bypassing vector search if business-compare)
             retriever = _get_retriever()
-            if request.skill_id == "business-compare" and request.selected_document_ids:
+            if request.skill_id == "business-compare":
+                if not request.selected_document_ids or len(request.selected_document_ids) != 2:
+                    logger.warning(
+                        "Skill 'business-compare' requires exactly 2 documents, but got %d: %s",
+                        len(request.selected_document_ids) if request.selected_document_ids else 0,
+                        request.selected_document_ids,
+                    )
+                    warning_msg = "Chế độ So sánh Nghiệp vụ yêu cầu chính xác 2 tài liệu để đối chiếu. Vui lòng đính kèm đủ 2 file."
+                    yield {"event": "sources", "data": json.dumps([])}
+                    yield {"event": "token", "data": warning_msg}
+                    yield {"event": "done", "data": json.dumps({"query": request.query, "total_chunks": 0})}
+                    return
+
                 logger.info(
-                    "Skill 'business-compare' active with %d documents: %s. Fetching full documents (bypassing RAG).",
-                    len(request.selected_document_ids),
+                    "Skill 'business-compare' active with 2 documents: %s. Fetching full documents (bypassing RAG).",
                     request.selected_document_ids,
                 )
                 results = retriever.get_full_documents(request.selected_document_ids)
-                if not results:
+                if len(results) < 2:
+                    for _ in range(3):
+                        await asyncio.sleep(0.5)
+                        results = retriever.get_full_documents(request.selected_document_ids)
+                        if len(results) == 2:
+                            break
+
+                if len(results) < 2:
                     logger.warning(
-                        "No full documents found in SQLite for IDs %s. Falling back to hybrid search.",
+                        "Could not load full documents for IDs %s (found %d/2).",
                         request.selected_document_ids,
+                        len(results),
                     )
-                    results = await retriever.search(request.query, top_k=top_k)
+                    error_msg = f"Không thể tải đủ nội dung 2 tài liệu để đối chiếu (tìm thấy {len(results)}/2 tài liệu). Vui lòng kiểm tra lại tài liệu và thử lại."
+                    yield {"event": "sources", "data": json.dumps([])}
+                    yield {"event": "token", "data": error_msg}
+                    yield {"event": "done", "data": json.dumps({"query": request.query, "total_chunks": 0})}
+                    return
             else:
                 results = await retriever.search(request.query, top_k=top_k)
 

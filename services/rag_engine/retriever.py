@@ -14,6 +14,7 @@ from typing import Optional
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, VectorParams
 import httpx
+import sqlite3
 
 from shared.sqlite_db import get_sqlite_connection
 
@@ -261,14 +262,17 @@ class Retriever:
             return []
 
     def get_full_documents(self, document_ids: list[str]) -> list[dict]:
-        """Fetch full concatenated text for specified document IDs from SQLite FTS5 table.
+        """Fetch full concatenated text for specified document IDs.
+
+        Prioritizes the `full_documents` table (clean, continuous raw text).
+        Falls back to concatenating chunks from `document_chunks` if full_documents is absent.
 
         Args:
             document_ids: List of document IDs (UUIDs) to retrieve.
 
         Returns:
             List of dicts formatted like retriever chunks, where each item represents
-            a full document with concatenated text from all its chunks in original order.
+            a full document in the requested order.
         """
         if not document_ids:
             return []
@@ -276,46 +280,76 @@ class Retriever:
         try:
             conn = get_sqlite_connection()
             placeholders = ",".join("?" for _ in document_ids)
-            query = f"""
-                SELECT rowid, id, document_id, filename, page, heading, text
-                FROM document_chunks
-                WHERE document_id IN ({placeholders})
-                ORDER BY document_id, rowid ASC
-            """
-            cursor = conn.execute(query, tuple(document_ids))
-            rows = cursor.fetchall()
-            conn.close()
 
-            # Group rows by document_id in the exact order requested
-            docs_by_id: dict[str, list] = {doc_id: [] for doc_id in document_ids}
-            for row in rows:
-                doc_id = row["document_id"]
-                if doc_id in docs_by_id:
-                    docs_by_id[doc_id].append(row)
+            # 1. Check full_documents table first (clean, unchunked text)
+            full_rows = {}
+            try:
+                full_cur = conn.execute(
+                    f"""
+                    SELECT document_id, filename, full_text, page_count
+                    FROM full_documents
+                    WHERE document_id IN ({placeholders})
+                    """,
+                    tuple(document_ids),
+                )
+                full_rows = {row["document_id"]: row for row in full_cur.fetchall()}
+            except sqlite3.OperationalError:
+                full_rows = {}
+
+            # 2. Check document_chunks table for any documents not found in full_documents
+            missing_ids = [doc_id for doc_id in document_ids if doc_id not in full_rows]
+            chunk_docs_by_id: dict[str, list] = {doc_id: [] for doc_id in missing_ids}
+
+            if missing_ids:
+                missing_placeholders = ",".join("?" for _ in missing_ids)
+                chunk_query = f"""
+                    SELECT rowid, id, document_id, filename, page, heading, text
+                    FROM document_chunks
+                    WHERE document_id IN ({missing_placeholders})
+                    ORDER BY document_id, rowid ASC
+                """
+                chunk_cursor = conn.execute(chunk_query, tuple(missing_ids))
+                for row in chunk_cursor.fetchall():
+                    d_id = row["document_id"]
+                    if d_id in chunk_docs_by_id:
+                        chunk_docs_by_id[d_id].append(row)
+
+            conn.close()
 
             full_docs = []
             for doc_id in document_ids:
-                chunk_rows = docs_by_id.get(doc_id, [])
-                if not chunk_rows:
-                    continue
-
-                first_row = chunk_rows[0]
-                filename = first_row["filename"] or f"document_{doc_id}"
-                full_text = "\n\n".join(r["text"].strip() for r in chunk_rows if r["text"])
-                total_pages = max((r["page"] for r in chunk_rows if r["page"] is not None), default=None)
-
-                full_docs.append({
-                    "id": f"full_{doc_id}",
-                    "text": full_text,
-                    "metadata": {
-                        "document_id": doc_id,
-                        "filename": filename,
-                        "page": total_pages,
-                        "heading": "Toàn văn tài liệu",
-                        "chunk_index": 0,
-                    },
-                    "score": 1.0,
-                })
+                if doc_id in full_rows:
+                    row = full_rows[doc_id]
+                    full_docs.append({
+                        "id": f"full_{doc_id}",
+                        "text": row["full_text"],
+                        "metadata": {
+                            "document_id": doc_id,
+                            "filename": row["filename"],
+                            "page": row["page_count"],
+                            "heading": "Toàn văn tài liệu",
+                            "chunk_index": 0,
+                        },
+                        "score": 1.0,
+                    })
+                elif chunk_docs_by_id.get(doc_id):
+                    chunk_rows = chunk_docs_by_id[doc_id]
+                    first_row = chunk_rows[0]
+                    filename = first_row["filename"] or f"document_{doc_id}"
+                    full_text = "\n\n".join(r["text"].strip() for r in chunk_rows if r["text"])
+                    total_pages = max((r["page"] for r in chunk_rows if r["page"] is not None), default=None)
+                    full_docs.append({
+                        "id": f"full_{doc_id}",
+                        "text": full_text,
+                        "metadata": {
+                            "document_id": doc_id,
+                            "filename": filename,
+                            "page": total_pages,
+                            "heading": "Toàn văn tài liệu",
+                            "chunk_index": 0,
+                        },
+                        "score": 1.0,
+                    })
 
             return full_docs
         except Exception as e:

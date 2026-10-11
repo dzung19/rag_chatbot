@@ -19,6 +19,7 @@ export interface Conversation {
   title: string;
   messages: ChatMessage[];
   updatedAt: number;
+  selectedDocumentIds?: string[];
 }
 
 export interface UploadProgressItem {
