@@ -264,29 +264,6 @@ export const useChatStore = create<ChatState>()(
         // 1. Handle file uploads if any
         if (hasFiles) {
           set({ isStreaming: true });
-          const uploadMsgId = generateUuid();
-          const uploadMsg: ChatMessage = {
-            id: uploadMsgId,
-            role: "assistant",
-            content: `Uploading ${attachedFiles.length} attached document(s)...`,
-            sources: [],
-            status: "streaming",
-            createdAt: Date.now(),
-          };
-
-          set((state) => {
-            const conv = state.conversations[activeId!];
-            return {
-              conversations: {
-                ...state.conversations,
-                [activeId!]: {
-                  ...conv,
-                  messages: [...conv.messages, uploadMsg],
-                  updatedAt: Date.now(),
-                },
-              },
-            };
-          });
 
           try {
             for (const file of attachedFiles) {
@@ -296,53 +273,16 @@ export const useChatStore = create<ChatState>()(
               }
             }
 
-            // Update upload assistant message
-            set((state) => {
-              const conv = state.conversations[activeId!];
-              return {
-                conversations: {
-                  ...state.conversations,
-                  [activeId!]: {
-                    ...conv,
-                    messages: conv.messages.map((m) =>
-                      m.id === uploadMsgId
-                        ? {
-                            ...m,
-                            content: `Successfully uploaded ${attachedFiles.length} document(s). Processing query...`,
-                            status: "done",
-                          }
-                        : m
-                    ),
-                    updatedAt: Date.now(),
-                  },
-                },
-              };
-            });
-            useToastStore.getState().pushToast("Attached documents uploaded successfully", "success");
+            useToastStore
+              .getState()
+              .pushToast(
+                `Đã tải lên thành công ${attachedFiles.length} tài liệu`,
+                "success"
+              );
           } catch (err: unknown) {
-            const errorMsg = err instanceof Error ? err.message : "Failed to upload attachments";
-            set((state) => {
-              const conv = state.conversations[activeId!];
-              return {
-                isStreaming: false,
-                conversations: {
-                  ...state.conversations,
-                  [activeId!]: {
-                    ...conv,
-                    messages: conv.messages.map((m) =>
-                      m.id === uploadMsgId
-                        ? {
-                            ...m,
-                            content: `Failed to upload documents: ${errorMsg}`,
-                            status: "error",
-                          }
-                        : m
-                    ),
-                    updatedAt: Date.now(),
-                  },
-                },
-              };
-            });
+            const errorMsg =
+              err instanceof Error ? err.message : "Failed to upload attachments";
+            set({ isStreaming: false });
             useToastStore.getState().pushToast(errorMsg, "error");
             return;
           }
