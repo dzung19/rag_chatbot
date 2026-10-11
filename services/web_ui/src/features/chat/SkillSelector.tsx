@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from "react";
-import { Zap, Bot, FileText, ShieldCheck, Mail, Scale, Wrench, Languages, Quote, Sparkles, GitCompare } from "lucide-react";
+import React, { useEffect, useState, useRef } from "react";
+import { Zap, Bot, FileText, ShieldCheck, Mail, Scale, Wrench, Languages, Quote, Sparkles, GitCompare, ChevronDown } from "lucide-react";
 import { useSkillStore } from "../../stores/skillStore";
 import styles from "./SkillSelector.module.css";
 
@@ -19,12 +19,29 @@ export const SkillSelector: React.FC = () => {
   } = useSkillStore();
 
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (skills.length === 0 && !isLoading) {
       fetchSkills();
     }
   }, [fetchSkills, skills.length, isLoading]);
+
+  // Click outside to close dropdown
+  useEffect(() => {
+    if (!isDropdownOpen) return;
+
+    const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setIsDropdownOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [isDropdownOpen]);
 
   const mainSkills = skills.filter((s) => s.type === "main");
   const modSkills = skills.filter((s) => s.type === "modifier");
@@ -43,7 +60,7 @@ export const SkillSelector: React.FC = () => {
   return (
     <div className={styles.container}>
       {/* Main Skill Dropdown */}
-      <div className={styles.dropdownWrapper}>
+      <div className={styles.dropdownWrapper} ref={dropdownRef}>
         <button
           className={styles.mainSkillBtn}
           onClick={() => setIsDropdownOpen(!isDropdownOpen)}
@@ -51,7 +68,7 @@ export const SkillSelector: React.FC = () => {
         >
           {activeMain ? renderIcon(activeMain.icon) : <Bot size={14} />}
           <span className={styles.skillName}>{activeMain?.name || "General Assistant"}</span>
-          <span className={styles.chevron}>▼</span>
+          <ChevronDown size={14} className={`${styles.chevron} ${isDropdownOpen ? styles.open : ""}`} />
         </button>
 
         {isDropdownOpen && (
