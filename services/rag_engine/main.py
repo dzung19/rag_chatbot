@@ -414,7 +414,8 @@ async def query_stream(request: ChatRequest):
 
         except Exception as e:
             logger.error("Streaming query failed: %s", str(e), exc_info=True)
-            yield {"event": "error", "data": "An error occurred processing your query."}
+            yield {"event": "error", "data": f"Lỗi xử lý phản hồi: {str(e)}"}
+            yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 

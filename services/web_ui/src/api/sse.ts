@@ -42,6 +42,7 @@ export async function* streamChat(
   let currentDataParts: string[] = [];
 
   let receivedDone = false;
+  let receivedError = false;
   function parseEvent(): ChatEvent | null {
     if (!currentEventType || currentDataParts.length === 0) {
       return null;
@@ -68,11 +69,10 @@ export async function* streamChat(
         return { type: "token", data: dataStr };
       }
     } else if (eventType === "done") {
-      if (eventType === "done") {
-        receivedDone = true;
-      }
+      receivedDone = true;
       return { type: "done" };
     } else if (eventType === "error") {
+      receivedError = true;
       return { type: "error", data: dataStr };
     }
 
@@ -111,16 +111,13 @@ export async function* streamChat(
     // Flush remaining buffer if any
     const trailingEvent = parseEvent();
     if (trailingEvent) {
-      if (
-        trailingEvent.type === "done"
-      ) {
+      if (trailingEvent.type === "done") {
         receivedDone = true;
       }
-
       yield trailingEvent;
     }
 
-    if (!receivedDone) {
+    if (!receivedDone && !receivedError) {
       throw new Error(
         "Chat stream ended without a done event.",
       );

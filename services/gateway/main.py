@@ -254,117 +254,117 @@ async def chat_stream(
         except Exception as e:
             logger.warning("Failed to start turn in conversation service: %s", str(e))
 
-        # Forward to RAG engine streaming endpoint
-        async def proxy_stream():
-            parser = SSEParser()
+    # Forward to RAG engine streaming endpoint
+    async def proxy_stream():
+        parser = SSEParser()
 
-            assistant_parts: list[str] = []
-            sources: list[dict] = []
-            received_done = False
-            
-            async def fail_turn(partial_content: str) -> None:
+        assistant_parts: list[str] = []
+        sources: list[dict] = []
+        received_done = False
+        
+        async def fail_turn(partial_content: str) -> None:
+            if not turn_id or not assistant_msg_id:
+                return
+
+            try:
+                fail_resp = await client.post(
+                    f"{settings.conversation_service_url}/internal/turns/{turn_id}/fail",
+                    headers={"x-internal-service-key": settings.internal_service_key or ""},
+                    json={
+                        "owner_id": current_user.user_id,
+                        "assistant_message_id": assistant_msg_id,
+                        "partial_content": partial_content,
+                    },
+                    timeout=5.0,
+                )
+                fail_resp.raise_for_status()
+            except httpx.HTTPError as error:
+                logger.warning("Unable to mark chat turn as failed: %s", str(error))
+        
+        async def handle_event(event: SSEEvent) -> None:
+            nonlocal sources, received_done
+
+            if event.event == "token":
+                # Giống client: nếu data không phải JSON string thì dùng raw text.
+                token = (
+                    event.data if isinstance(event.data, str) else event.raw_data
+                )
+                assistant_parts.append(token)
+
+            elif event.event == "sources":
+                if isinstance(event.data, list):
+                    sources = [
+                        item for item in event.data if isinstance(item, dict)
+                    ]
+
+            elif event.event == "done":
+                received_done = True
+                assistant_content = "".join(assistant_parts)
+
+                logger.info(
+                    "RAG done. turn_id=%s content_length=%d",
+                    turn_id,
+                    len(assistant_content),
+                )
+
                 if not turn_id or not assistant_msg_id:
                     return
 
+                if not assistant_content.strip():
+                    logger.warning(
+                        "Skip complete because assistant content is empty. turn_id=%s",
+                        turn_id,
+                    )
+                    return
+
                 try:
-                    fail_resp = await client.post(
-                        f"{settings.conversation_service_url}/internal/turns/{turn_id}/fail",
-                        headers={"x-internal-service-key": settings.internal_service_key or ""},
+                    complete_response = await client.post(
+                        f"{settings.conversation_service_url}/internal/turns/{turn_id}/complete",
+                        headers={
+                            "X-Internal-Service-Key": settings.internal_service_key,
+                        },
                         json={
                             "owner_id": current_user.user_id,
                             "assistant_message_id": assistant_msg_id,
-                            "partial_content": partial_content,
+                            "content": assistant_content,
+                            "sources": sources,
                         },
                         timeout=5.0,
                     )
-                    fail_resp.raise_for_status()
+                    complete_response.raise_for_status()
                 except httpx.HTTPError as error:
-                    logger.warning("Unable to mark chat turn as failed: %s", str(error))
-            
-            async def handle_event(event: SSEEvent) -> None:
-                nonlocal sources, received_done
-
-                if event.event == "token":
-                    # Giống client: nếu data không phải JSON string thì dùng raw text.
-                    token = (
-                        event.data if isinstance(event.data, str) else event.raw_data
-                    )
-                    assistant_parts.append(token)
-
-                elif event.event == "sources":
-                    if isinstance(event.data, list):
-                        sources = [
-                            item for item in event.data if isinstance(item, dict)
-                        ]
-
-                elif event.event == "done":
-                    received_done = True
-                    assistant_content = "".join(assistant_parts)
-
-                    logger.info(
-                        "RAG done. turn_id=%s content_length=%d",
-                        turn_id,
-                        len(assistant_content),
+                    logger.warning(
+                        "Unable to complete chat history: %s", str(error)
                     )
 
-                    if not turn_id or not assistant_msg_id:
-                        return
+        try:
+            async with client.stream(
+                "POST",
+                f"{settings.rag_engine_service_url}/rag/query",
+                json=request.model_dump(),
+            ) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes():
+                    for event in parser.feed(chunk):
+                        await handle_event(event)
+                    yield chunk
+                for event in parser.flush():
+                    await handle_event(event)
+                    
+        except Exception as e:
+            logger.error("Chat stream error: %s", str(e))
+            await fail_turn("".join(assistant_parts))
+            raise
 
-                    if not assistant_content.strip():
-                        logger.warning(
-                            "Skip complete because assistant content is empty. turn_id=%s",
-                            turn_id,
-                        )
-                        return
-
-                    try:
-                        complete_response = await client.post(
-                            f"{settings.conversation_service_url}/internal/turns/{turn_id}/complete",
-                            headers={
-                                "X-Internal-Service-Key": settings.internal_service_key,
-                            },
-                            json={
-                                "owner_id": current_user.user_id,
-                                "assistant_message_id": assistant_msg_id,
-                                "content": assistant_content,
-                                "sources": sources,
-                            },
-                            timeout=5.0,
-                        )
-                        complete_response.raise_for_status()
-                    except httpx.HTTPError as error:
-                        logger.warning(
-                            "Unable to complete chat history: %s", str(error)
-                        )
-
-            try:
-                async with client.stream(
-                    "POST",
-                    f"{settings.rag_engine_service_url}/rag/query",
-                    json=request.model_dump(),
-                ) as response:
-                    response.raise_for_status()
-                    async for chunk in response.aiter_bytes():
-                        for event in parser.feed(chunk):
-                           await handle_event(event)
-                        yield chunk
-                    for event in parser.flush():
-                       await handle_event(event)
-                        
-            except Exception as e:
-                logger.error("Chat stream error: %s", str(e))
-                await fail_turn("".join(assistant_parts))
-                raise
-
-        return StreamingResponse(
-            proxy_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
+    return StreamingResponse(
+        proxy_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/v1/chat/sync", response_model=ChatResponse)

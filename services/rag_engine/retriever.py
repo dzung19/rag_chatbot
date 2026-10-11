@@ -93,12 +93,21 @@ class Retriever:
             # Note: where_filter translation from chroma to qdrant might be needed
             # For now, passing without filter mapping
             
-            q_results = await self._qdrant_client.search(
-                collection_name=self._collection_name,
-                query_vector=query_embedding,
-                limit=top_k,
-                with_payload=True
-            )
+            if hasattr(self._qdrant_client, "query_points"):
+                q_response = await self._qdrant_client.query_points(
+                    collection_name=self._collection_name,
+                    query=query_embedding,
+                    limit=top_k,
+                    with_payload=True
+                )
+                q_results = q_response.points
+            else:
+                q_results = await self._qdrant_client.search(
+                    collection_name=self._collection_name,
+                    query_vector=query_embedding,
+                    limit=top_k,
+                    with_payload=True
+                )
             
             dense_results = []
             for point in q_results:
