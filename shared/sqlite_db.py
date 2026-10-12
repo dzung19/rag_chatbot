@@ -8,6 +8,133 @@ from shared.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+""" 
+# Mục đích
+Đối chiếu **BL** với **BL Check List** do người dùng cung cấp, lấy BL Check List làm chuẩn, ngoại trừ SHIPPER dùng dữ liệu chuẩn trong hướng dẫn này. Báo cáo đầy đủ, chính xác và không suy đoán.
+
+# Nguyên tắc bắt buộc
+- Chỉ bắt đầu khi có cả hai file hoặc nội dung tương ứng.
+- Có dữ liệu ở cả hai nguồn: đối chiếu và kết luận **ĐÚNG** hoặc **SAI**.
+- Thiếu dữ liệu ở một trong hai nguồn: kết luận **KHÔNG TÌM THẤY**.
+- Không xác định được cách đối chiếu: kết luận **KHÔNG HIỂU**.
+- Không suy luận dữ liệu từ BL sang BL Check List hoặc ngược lại.
+- Bỏ qua khác biệt chỉ về dấu cách hoặc định dạng tại CONSIGNEE, NOTIFY PARTY 1, NOTIFY PARTY 2 và DELIVERY TO.
+- Nếu thông tin dài được nối bằng `*`, `>>` hoặc ký hiệu tương tự, tìm phần nối và ghép đủ nội dung trước khi so sánh.
+- Với mọi điểm sai, in đậm phần dữ liệu khác nhau và chữ **SAI**.
+
+# Dữ liệu chuẩn SHIPPER
+BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, HAI PHONG CITY, VIETNAM TEL NO.84-2203-545 860 FAX:545 878 MS. HARUNA WATANABE TRN+0800304173.
+
+# Quy tắc ánh xạ
+- FROM ↔ PORT OF LOADING.
+- VIA ↔ PORT OF DISCHARGE.
+- TO ↔ PLACE OF DELIVERY.
+- REQUEST NO. ↔ SHIPMENT/SHIPMENT NO.
+- NOTIFY PARTY 2 ↔ ALSO NOTIFY PARTY.
+- ETD HPH ON trong REQUEST ↔ ETD trên BL.
+- ISSUE DATE phải bằng ETD.
+- SDD trên BL Check List ↔ DOOR trên BL. Ví dụ: `CY / BADEN SDD` ↔ `CY/DOOR`.
+
+# Các bước kiểm tra
+1. **Đọc và chuẩn hóa:** nhận diện từng trang, từng invoice, từng container và các phần thông tin nối tiếp; giữ nguyên giá trị gốc để trình bày.
+2. **Số bill và invoice:**
+   - Lấy chuỗi từ phần số đến hết chữ/số trên từng dòng INVOICE NO.; ví dụ `824957-0`.
+   - Kiểm tra mỗi dòng BILL OF LADING (AIR WAYBILL) có số bill và số đó khớp BL.
+   - Tại trang tổng hợp có G-TOTAL, kiểm tra đã bao gồm toàn bộ invoice ở các trang trước và không có invoice thừa.
+   - Hiểu dạng rút gọn `824957-0 1` là `824957-0` và `824957-1`.
+3. **B/L REQUIRED:** trên BL, `ON BOARD Date + ngày` nghĩa là ON BOARD; `RECEIVED DATE + ngày` nghĩa là RECEIVED. Đối chiếu với B/L REQUIRED trên Check List. BL chỉ có đúng một loại ngày là hợp lệ; có đồng thời cả hai loại là **SAI**.
+4. **Description of goods**
+
+   **4.1. Với mỗi invoice trong BL Check List:**
+   - Lấy toàn bộ nội dung nằm ngay dưới dòng INVOICE NO. đến ngay trên dòng TTL đầu tiên.
+   - Mỗi dòng mô tả hàng hóa được xem là một description riêng.
+
+   **4.2. Gộp description của tất cả invoice:**
+   - Gộp toàn bộ description từ tất cả invoice.
+   - Loại bỏ các dòng trùng lặp hoàn toàn.
+   - Sau khi loại trùng, tạo danh sách GOODS DESCRIPTION chuẩn duy nhất (unique list).
+
+   **4.3. Trích xuất GOODS DESCRIPTION trên BL:**
+   1. Đọc description theo từng container và giữ nguyên từng lần xuất hiện.
+   2. Ghép các description bị ngắt dòng, nối trang hoặc tách bởi ký hiệu.
+   3. **Không loại trùng, không gộp thành danh sách duy nhất và không bỏ qua description giống nhau trên BL.**
+   4. Ghi lại số lần xuất hiện và container chứa từng description.
+
+   **4.4. Thứ tự kiểm tra bắt buộc:**
+   1. Tạo danh sách chuẩn duy nhất từ BL Check List bằng cách loại các description trùng hoàn toàn.
+   2. Trích xuất danh sách thực tế từ BL nhưng **giữ nguyên mọi lần lặp**.
+   3. **Đếm số lần xuất hiện trên BL trước khi thực hiện bất kỳ thao tác loại trùng nào.**
+   4. Mỗi description chuẩn phải xuất hiện **đúng 1 lần trên toàn bộ BL**, không phải một lần cho mỗi container.
+   5. Xuất hiện 0 lần → **SAI: thiếu**.
+   6. Xuất hiện từ 2 lần trở lên, kể cả ở các container khác nhau → **SAI: trùng lặp**.
+   7. Description không có trong danh sách chuẩn → **SAI: thừa**.
+   8. Chỉ kết luận **ĐÚNG** khi tất cả description chuẩn xuất hiện đúng một lần và BL không có description thừa.
+
+   **4.5. Bằng chứng trong kết quả:**
+   - Hiển thị từng description, số lần xuất hiện và danh sách container tương ứng.
+   - Không được kết luận dựa trên phép so sánh hai tập hợp đã loại trùng.
+   - Với dữ liệu 830753, `LASER PRINTER`, `DIGITAL COPIER/PRINTER` và `MULTI-FUNCTIONAL COPIER/PRINTER/FAX` lặp lại nên GOODS DESCRIPTION phải là **SAI**.
+
+   **4.6. Khi lập bảng kết quả:**
+   - Hiển thị GOODS DESCRIPTION chuẩn sau khi đã gộp và loại trùng từ BL Check List.
+   - Hiển thị GOODS DESCRIPTION thực tế trên BL.
+   - Nêu rõ description nào thiếu, thừa hoặc bị lặp nếu kết quả là **SAI**.
+5. **Đối chiếu toàn bộ hạng mục:**
+   1. SHIPPER với dữ liệu chuẩn.
+   2. CONSIGNEE.
+   3. NOTIFY PARTY 1.
+   4. NOTIFY PARTY 2.
+   5. DELIVERY TO.
+   6. CONTAINER NO. từng container.
+   7. SEAL NO. từng container.
+   8. CONTAINER TYPE từng container.
+   9. P'KGS từng container.
+   10. WEIGHT từng container.
+   11. MEASUREMENT/M3 từng container.
+   12. Tổng P'KGS, WEIGHT và MEASUREMENT/M3 toàn bộ container.
+   13. GOODS DESCRIPTION.
+   14. PORT OF LOADING.
+   15. PORT OF DISCHARGE.
+   16. PLACE OF DELIVERY.
+   17. ETD.
+   18. ISSUE DATE = ETD.
+   19. Tổng số container + loại container, ví dụ `2x40 HC`.
+   20. Delivery term: CY-CY, CY-DOOR, CFS-CFS hoặc CFS-DOOR.
+   21. SHIPMENT NO.
+   22. B/L REQUIRED: ON BOARD hoặc RECEIVED theo quy tắc trên.
+   23. HS code: BL không được hiển thị HS code; nếu có thì **SAI**.
+6. **Đếm kết quả:** đếm riêng ĐÚNG, SAI, KHÔNG HIỂU và KHÔNG TÌM THẤY. Mỗi container và mỗi thuộc tính container là một điểm kiểm tra riêng.
+
+# Định dạng đầu ra
+Tạo một file Excel `.xlsx` gồm đúng 2 sheet, định dạng tiêu đề rõ ràng, bật bộ lọc và tự điều chỉnh độ rộng cột để dễ đọc.
+
+## Sheet 1: TỔNG HỢP ĐIỂM ĐÚNG
+- Chỉ đưa các hạng mục có kết quả **ĐÚNG** vào sheet này.
+- Dùng các cột: **File | Hạng mục check | Dữ liệu BL Check List | Dữ liệu BL | Kết quả**.
+- Với hạng mục container, mỗi container và mỗi thuộc tính là một dòng riêng.
+- Thêm dòng tổng cuối sheet gồm **Tổng số điểm đúng** theo từng file.
+
+## Sheet 2: ĐIỂM CẦN XỬ LÝ
+- Tổng hợp tất cả hạng mục có kết quả **SAI**, **KHÔNG TÌM THẤY** hoặc **KHÔNG HIỂU**.
+- Dùng các cột: **File | Hạng mục check | Dữ liệu BL Check List | Dữ liệu BL | Kết quả | Nội dung cần xử lý**.
+- Nêu rõ phần khác nhau, dữ liệu thiếu, nguyên nhân không hiểu hoặc hành động người dùng cần kiểm tra.
+- Tô màu kết quả để phân biệt: **SAI** màu đỏ, **KHÔNG TÌM THẤY** màu cam, **KHÔNG HIỂU** màu vàng.
+- Thêm dòng tổng cuối sheet gồm số điểm **SAI**, **KHÔNG TÌM THẤY** và **KHÔNG HIỂU** theo từng file.
+
+## Lời nhắc bắt buộc
+Đặt lời nhắc sau ở đầu sheet **ĐIỂM CẦN XỬ LÝ**, giữ nguyên chính xác, in hoa và in đậm:
+
+**BẠN HÃY TỰ CHECK LOẠI BL, NUMBER OF ORINAL BL, ETA VIA, ETA TO VÀ CÁC ĐIỂM ĐẶC BIỆT DÀNH CHO THỊ TRƯỜNG MÀ BẠN ĐANG CHECK BL**
+
+## Hoàn tất
+- Sau khi kiểm tra xong, tạo và đính kèm file Excel để người dùng tải xuống.
+- Nếu có nhiều BL, giữ chung 2 sheet và phân biệt từng BL bằng cột **File**.
+
+# Xử lý lỗi
+- Nếu file không đọc được hoặc không phân biệt được BL với BL Check List, nêu rõ file liên quan và dùng **KHÔNG TÌM THẤY** cho dữ liệu không trích xuất được.
+- Nếu bố cục mới không khớp quy tắc đã nêu, dùng **KHÔNG HIỂU** thay vì tự diễn giải.
+- Nếu có nhiều BL, tổng hợp toàn bộ kết quả vào cùng file Excel và phân biệt theo cột **File**.
+"""
 
 def _init_db(conn: sqlite3.Connection) -> None:
     """Initialize or upgrade FTS5 table with Vietnamese-friendly unicode61 tokenizer."""

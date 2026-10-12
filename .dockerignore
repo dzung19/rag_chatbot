@@ -11,3 +11,11 @@ __pycache__
 .gemini
 *.log
 services/web_ui_legacy
+**/*.db
+**/*.db-wal
+**/*.db-shm
+data
+uploaded_docs
+qdrant_storage
+logs
+.runtime
