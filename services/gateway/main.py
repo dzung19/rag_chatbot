@@ -261,7 +261,7 @@ async def chat_stream(
         assistant_parts: list[str] = []
         sources: list[dict] = []
         received_done = False
-        
+
         async def fail_turn(partial_content: str) -> None:
             if not turn_id or not assistant_msg_id:
                 return
@@ -269,7 +269,9 @@ async def chat_stream(
             try:
                 fail_resp = await client.post(
                     f"{settings.conversation_service_url}/internal/turns/{turn_id}/fail",
-                    headers={"x-internal-service-key": settings.internal_service_key or ""},
+                    headers={
+                        "x-internal-service-key": settings.internal_service_key or ""
+                    },
                     json={
                         "owner_id": current_user.user_id,
                         "assistant_message_id": assistant_msg_id,
@@ -280,22 +282,18 @@ async def chat_stream(
                 fail_resp.raise_for_status()
             except httpx.HTTPError as error:
                 logger.warning("Unable to mark chat turn as failed: %s", str(error))
-        
+
         async def handle_event(event: SSEEvent) -> None:
             nonlocal sources, received_done
 
             if event.event == "token":
                 # Giống client: nếu data không phải JSON string thì dùng raw text.
-                token = (
-                    event.data if isinstance(event.data, str) else event.raw_data
-                )
+                token = event.data if isinstance(event.data, str) else event.raw_data
                 assistant_parts.append(token)
 
             elif event.event == "sources":
                 if isinstance(event.data, list):
-                    sources = [
-                        item for item in event.data if isinstance(item, dict)
-                    ]
+                    sources = [item for item in event.data if isinstance(item, dict)]
 
             elif event.event == "done":
                 received_done = True
@@ -663,9 +661,11 @@ async def admin_deleted_conversations(
         params=params,
     )
 
+
 # ---------------------------------------------------------------------------
 # Admin Endpoints
 # ---------------------------------------------------------------------------
+
 
 @app.post("/api/v1/admin/conversations/{conversation_id}/restore")
 async def admin_restore(
@@ -693,6 +693,7 @@ async def admin_audit(
         current_user,
         params={"limit": limit, "offset": offset},
     )
+
 
 # ---------------------------------------------------------------------------
 # Skills Endpoints
@@ -893,7 +894,9 @@ async def get_document_status(document_id: str):
     except httpx.ConnectError:
         raise HTTPException(status_code=503, detail="Ingestion service unavailable.")
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail="Document status not found.")
+        raise HTTPException(
+            status_code=e.response.status_code, detail="Document status not found."
+        )
     except Exception as e:
         logger.error("Get document status error: %s", str(e))
         raise HTTPException(status_code=500, detail="An error occurred.")

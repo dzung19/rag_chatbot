@@ -170,7 +170,7 @@ def build_rag_messages(
     Returns:
         List of message dicts: [{"role": "system", ...}, {"role": "user", ...}]
     """
-    if main_skill and main_skill.id == "business-compare" and len(context_chunks) == 2:
+    if main_skill and main_skill.id == "comparative-analyst" and len(context_chunks) == 2:
         context_text = build_compare_context_text(context_chunks, max_chars=max_context_chars)
     else:
         context_text = build_context_text(context_chunks, max_chars=max_context_chars)
@@ -207,7 +207,7 @@ def build_rag_prompt(
     main_skill: Optional[Skill] = None,
 ) -> str:
     """Build a single-string RAG prompt for backward compatibility."""
-    if main_skill and main_skill.id == "business-compare" and len(context_chunks) == 2:
+    if main_skill and main_skill.id == "comparative-analyst" and len(context_chunks) == 2:
         context_text = build_compare_context_text(context_chunks, max_chars=max_context_chars)
     else:
         context_text = build_context_text(context_chunks, max_chars=max_context_chars)
