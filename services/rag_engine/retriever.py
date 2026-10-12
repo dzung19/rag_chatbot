@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 _CHUNK_ID_PATTERN = re.compile(r"_chunk_(\d+)$")
 
-
 class Retriever:
     """Retrieves relevant document chunks from ChromaDB and SQLite FTS5."""
 
@@ -78,6 +77,7 @@ class Retriever:
         response.raise_for_status()
         data = response.json()
         return data["embeddings"][0]
+    
 
     async def _dense_search(
         self,
@@ -89,16 +89,16 @@ class Retriever:
         try:
             query_embedding = await self._embed_query(query)
             await self._ensure_collection()
-
+            
             # Note: where_filter translation from chroma to qdrant might be needed
             # For now, passing without filter mapping
-
+            
             if hasattr(self._qdrant_client, "query_points"):
                 q_response = await self._qdrant_client.query_points(
                     collection_name=self._collection_name,
                     query=query_embedding,
                     limit=top_k,
-                    with_payload=True,
+                    with_payload=True
                 )
                 q_results = q_response.points
             else:
@@ -106,9 +106,9 @@ class Retriever:
                     collection_name=self._collection_name,
                     query_vector=query_embedding,
                     limit=top_k,
-                    with_payload=True,
+                    with_payload=True
                 )
-
+            
             dense_results = []
             for point in q_results:
                 payload = point.payload or {}
@@ -121,15 +121,13 @@ class Retriever:
                 else:
                     chunk_id = str(point.id)
 
-                dense_results.append(
-                    {
-                        "id": chunk_id,
-                        "text": payload.get("text", ""),
-                        "metadata": payload,
-                        "score": point.score,
-                    }
-                )
-
+                dense_results.append({
+                    "id": chunk_id,
+                    "text": payload.get("text", ""),
+                    "metadata": payload,
+                    "score": point.score,
+                })
+                
             return dense_results
         except Exception as e:
             logger.error("Dense search failed: %s", str(e))
@@ -139,7 +137,7 @@ class Retriever:
         """Lấy chunk_index từ ID dạng '<document_id>_chunk_<n>'."""
         match = _CHUNK_ID_PATTERN.search(chunk_id or "")
         return int(match.group(1)) if match else None
-
+    
     async def _keyword_search(self, query: str, top_k: int = 20) -> list[dict]:
         """Perform BM25 keyword search using SQLite FTS5 with word-level OR matching."""
         try:
@@ -212,9 +210,7 @@ class Retriever:
                 return []
 
             # 1 & 2. Run Dense & Sparse searches in parallel
-            dense_task = self._dense_search(
-                clean_query, top_k=20, where_filter=where_filter
-            )
+            dense_task = self._dense_search(clean_query, top_k=20, where_filter=where_filter)
             sparse_task = self._keyword_search(clean_query, top_k=20)
             res_dense, res_sparse = await asyncio.gather(
                 dense_task, sparse_task, return_exceptions=True
@@ -236,9 +232,7 @@ class Retriever:
             for rank, chunk in enumerate(dense_results):
                 doc_id = chunk["id"]
                 chunk_map[doc_id] = chunk
-                fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + 1.0 / (
-                    k_rrf + rank + 1
-                )
+                fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + 1.0 / (k_rrf + rank + 1)
 
             # Score sparse results
             for rank, chunk in enumerate(sparse_results):
@@ -250,14 +244,10 @@ class Retriever:
                     for k, v in chunk.get("metadata", {}).items():
                         if v and not chunk_map[doc_id].get("metadata", {}).get(k):
                             chunk_map[doc_id].setdefault("metadata", {})[k] = v
-                fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + 1.0 / (
-                    k_rrf + rank + 1
-                )
+                fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + 1.0 / (k_rrf + rank + 1)
 
             # Sort by fused score descending
-            sorted_fused = sorted(
-                fused_scores.items(), key=lambda x: x[1], reverse=True
-            )
+            sorted_fused = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
 
             # 4. Format top_k results
             final_results = []
@@ -339,50 +329,40 @@ class Retriever:
             for doc_id in document_ids:
                 if doc_id in full_rows:
                     row = full_rows[doc_id]
-                    full_docs.append(
-                        {
-                            "id": f"full_{doc_id}",
-                            "text": row["full_text"],
-                            "metadata": {
-                                "document_id": doc_id,
-                                "filename": row["filename"],
-                                "page": row["page_count"],
-                                "heading": "Toàn văn tài liệu",
-                                "chunk_index": 0,
-                            },
-                            "score": 1.0,
-                        }
-                    )
+                    full_docs.append({
+                        "id": f"full_{doc_id}",
+                        "text": row["full_text"],
+                        "metadata": {
+                            "document_id": doc_id,
+                            "filename": row["filename"],
+                            "page": row["page_count"],
+                            "heading": "Toàn văn tài liệu",
+                            "chunk_index": 0,
+                        },
+                        "score": 1.0,
+                    })
                 elif chunk_docs_by_id.get(doc_id):
                     chunk_rows = chunk_docs_by_id[doc_id]
                     first_row = chunk_rows[0]
                     filename = first_row["filename"] or f"document_{doc_id}"
-                    full_text = "\n\n".join(
-                        r["text"].strip() for r in chunk_rows if r["text"]
-                    )
-                    total_pages = max(
-                        (r["page"] for r in chunk_rows if r["page"] is not None),
-                        default=None,
-                    )
-                    full_docs.append(
-                        {
-                            "id": f"full_{doc_id}",
-                            "text": full_text,
-                            "metadata": {
-                                "document_id": doc_id,
-                                "filename": filename,
-                                "page": total_pages,
-                                "heading": "Toàn văn tài liệu",
-                                "chunk_index": 0,
-                            },
-                            "score": 1.0,
-                        }
-                    )
+                    full_text = "\n\n".join(r["text"].strip() for r in chunk_rows if r["text"])
+                    total_pages = max((r["page"] for r in chunk_rows if r["page"] is not None), default=None)
+                    full_docs.append({
+                        "id": f"full_{doc_id}",
+                        "text": full_text,
+                        "metadata": {
+                            "document_id": doc_id,
+                            "filename": filename,
+                            "page": total_pages,
+                            "heading": "Toàn văn tài liệu",
+                            "chunk_index": 0,
+                        },
+                        "score": 1.0,
+                    })
+
             return full_docs
         except Exception as e:
-            logger.error(
-                "Failed to fetch full documents from SQLite: %s", str(e), exc_info=True
-            )
+            logger.error("Failed to fetch full documents from SQLite: %s", str(e), exc_info=True)
             return []
 
     async def close(self) -> None:

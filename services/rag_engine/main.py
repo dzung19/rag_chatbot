@@ -97,11 +97,11 @@ def _clean_latex_arrows(text: str) -> str:
         lambda m: (
             "→"
             if "right" in m.group(0).lower()
-            else (
-                "←"
-                if "left" in m.group(0).lower()
-                else "↑" if "up" in m.group(0).lower() else "↓"
-            )
+            else "←"
+            if "left" in m.group(0).lower()
+            else "↑"
+            if "up" in m.group(0).lower()
+            else "↓"
         ),
         text,
         flags=re.IGNORECASE,
@@ -112,11 +112,11 @@ def _clean_latex_arrows(text: str) -> str:
         lambda m: (
             "→"
             if "right" in m.group(0).lower()
-            else (
-                "←"
-                if "left" in m.group(0).lower()
-                else "↑" if "up" in m.group(0).lower() else "↓"
-            )
+            else "←"
+            if "left" in m.group(0).lower()
+            else "↑"
+            if "up" in m.group(0).lower()
+            else "↓"
         ),
         text,
         flags=re.IGNORECASE,
@@ -209,11 +209,8 @@ async def query_sync(
 
         # 1. Retrieve relevant context (bypassing vector search if business-compare)
         retriever = _get_retriever()
-        if request.skill_id == "comparative-analyst":
-            if (
-                not request.selected_document_ids
-                or len(request.selected_document_ids) != 2
-            ):
+        if request.skill_id == "business-compare":
+            if not request.selected_document_ids or len(request.selected_document_ids) != 2:
                 logger.warning(
                     "Skill 'business-compare' requires exactly 2 documents, but got %d: %s",
                     len(request.selected_document_ids) if request.selected_document_ids else 0,
@@ -341,11 +338,8 @@ async def query_stream(request: ChatRequest):
 
             # 1. Retrieve context (bypassing vector search if business-compare)
             retriever = _get_retriever()
-            if request.skill_id == "comparative-analyst":
-                if (
-                    not request.selected_document_ids
-                    or len(request.selected_document_ids) != 2
-                ):
+            if request.skill_id == "business-compare":
+                if not request.selected_document_ids or len(request.selected_document_ids) != 2:
                     logger.warning(
                         "Skill 'business-compare' requires exactly 2 documents, but got %d: %s",
                         len(request.selected_document_ids) if request.selected_document_ids else 0,
