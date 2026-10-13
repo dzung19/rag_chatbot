@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     ollama_timeout: int = Field(default=300, description="LLM request timeout in seconds")
     ollama_num_threads: int | None = Field(default=None, description="Number of CPU threads for Ollama inference")
     ollama_num_predict: int = Field(default=1024, description="Max output tokens per response")
+    llm_max_concurrency: int = Field(default=3, ge=1, le=50, description="Max concurrent LLM generation requests")
+    llm_queue_timeout: int = Field(default=120, ge=5, le=600, description="Max seconds to wait in LLM queue before timeout")
 
     # --- Qdrant ---
     qdrant_url: str = Field(default="http://127.0.0.1:6333")

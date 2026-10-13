@@ -79,6 +79,8 @@ def _get_llm_client() -> OllamaLLMClient:
             model=settings.ollama_model,
             timeout=settings.ollama_timeout,
             num_threads=settings.ollama_num_threads,
+            max_concurrency=settings.llm_max_concurrency,
+            queue_timeout=settings.llm_queue_timeout,
         )
     return _llm_client
 
@@ -302,6 +304,12 @@ async def query_sync(
             processing_time_ms=round(duration_ms, 1),
         )
 
+    except TimeoutError as te:
+        logger.error("Sync query timed out in LLM queue: %s", str(te))
+        raise HTTPException(
+            status_code=503,
+            detail="Hệ thống đang quá tải (hàng đợi xử lý LLM đã hết thời gian chờ). Vui lòng thử lại sau.",
+        )
     except Exception as e:
         logger.error("RAG query failed: %s", str(e), exc_info=True)
         raise HTTPException(
@@ -412,6 +420,14 @@ async def query_stream(request: ChatRequest):
 
             yield {"event": "done", "data": ""}
 
+        except TimeoutError as te:
+            logger.error("Streaming query timed out in LLM queue: %s", str(te))
+            yield {
+                "event": "error",
+                "data": "Hệ thống đang quá tải (hàng đợi xử lý LLM đã hết thời gian chờ). Vui lòng thử lại sau giây lát.",
+            }
+            yield {"event": "done", "data": ""}
+
         except Exception as e:
             logger.error("Streaming query failed: %s", str(e), exc_info=True)
             yield {"event": "error", "data": f"Lỗi xử lý phản hồi: {str(e)}"}
@@ -424,9 +440,11 @@ async def query_stream(request: ChatRequest):
 async def health_check():
     """Health check endpoint."""
     ollama_ok = False
+    concurrency_info = ""
     try:
         llm = _get_llm_client()
         ollama_ok = await llm.health_check()
+        concurrency_info = f" | LLM Concurrency: {llm.active_requests}/{llm.max_concurrency} (queued: {llm.waiting_requests})"
     except Exception:
         pass
 
@@ -434,7 +452,7 @@ async def health_check():
         service="rag_engine",
         status="healthy" if ollama_ok else "degraded",
         version="0.1.0",
-        details=f"Ollama: {'connected' if ollama_ok else 'unavailable'}",
+        details=f"Ollama: {'connected' if ollama_ok else 'unavailable'}{concurrency_info}",
     )
 
 

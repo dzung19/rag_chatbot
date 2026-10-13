@@ -7,6 +7,8 @@ and persistent HTTP connection pooling.
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 import json
 import logging
 from typing import AsyncGenerator, Optional
@@ -17,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class OllamaLLMClient:
-    """Async client for Ollama LLM inference."""
+    """Async client for Ollama LLM inference with concurrency control."""
 
     def __init__(
         self,
@@ -25,12 +27,96 @@ class OllamaLLMClient:
         model: str = "gemma4:e4b",
         timeout: int = 300,
         num_threads: Optional[int] = None,
+        max_concurrency: int = 3,
+        queue_timeout: int = 120,
     ):
         self.ollama_host = ollama_host.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.num_threads = num_threads
+        self.max_concurrency = max_concurrency
+        self.queue_timeout = queue_timeout
         self._client: Optional[httpx.AsyncClient] = None
+        self._semaphore: Optional[asyncio.Semaphore] = None
+        self._lock: Optional[asyncio.Lock] = None
+        self._active_count = 0
+        self._waiting_count = 0
+
+    @property
+    def active_requests(self) -> int:
+        """Current number of requests actively executing LLM generation."""
+        return self._active_count
+
+    @property
+    def waiting_requests(self) -> int:
+        """Number of requests queued waiting for an available LLM slot."""
+        return self._waiting_count
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        """Lazy-initialize asyncio.Semaphore on the active running event loop."""
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self.max_concurrency)
+            self._lock = asyncio.Lock()
+        return self._semaphore
+
+    @asynccontextmanager
+    async def acquire_slot(self) -> AsyncGenerator[dict, None]:
+        """Acquire a concurrency slot before querying Ollama LLM.
+
+        Queues incoming requests when all slots are occupied.
+        Times out if waiting exceeds queue_timeout seconds.
+        """
+        sem = self._get_semaphore()
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+
+        async with self._lock:
+            self._waiting_count += 1
+            waiting = self._waiting_count
+            active = self._active_count
+
+        if active >= self.max_concurrency:
+            logger.warning(
+                "LLM concurrency limit reached (%d/%d active). Request queued (position: #%d).",
+                active,
+                self.max_concurrency,
+                waiting,
+            )
+
+        acquired = False
+        try:
+            try:
+                await asyncio.wait_for(sem.acquire(), timeout=self.queue_timeout)
+                acquired = True
+            except asyncio.TimeoutError:
+                logger.error(
+                    "LLM queue timeout after %ds (active: %d, waiting: %d)",
+                    self.queue_timeout,
+                    self._active_count,
+                    self._waiting_count,
+                )
+                raise TimeoutError(
+                    f"LLM request timed out waiting in queue ({self.queue_timeout}s)."
+                )
+
+            async with self._lock:
+                self._waiting_count = max(0, self._waiting_count - 1)
+                self._active_count += 1
+
+            yield {
+                "active": self._active_count,
+                "waiting": self._waiting_count,
+            }
+        finally:
+            if acquired:
+                sem.release()
+                if self._lock:
+                    async with self._lock:
+                        self._active_count = max(0, self._active_count - 1)
+            else:
+                if self._lock:
+                    async with self._lock:
+                        self._waiting_count = max(0, self._waiting_count - 1)
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -85,7 +171,7 @@ class OllamaLLMClient:
         temperature: float = 0.7,
         num_predict: int = 1024,
     ) -> str:
-        """Generate a complete (non-streaming) response.
+        """Generate a complete (non-streaming) response with concurrency limiting.
 
         Args:
             prompt: Full prompt string (fallback if messages not supplied).
@@ -96,25 +182,26 @@ class OllamaLLMClient:
         Returns:
             Generated text response.
         """
-        client = await self._get_client()
-        chat_messages = self._prepare_messages(prompt=prompt, messages=messages)
-        options = self._build_options(
-            temperature=temperature,
-            num_predict=num_predict,
-        )
+        async with self.acquire_slot():
+            client = await self._get_client()
+            chat_messages = self._prepare_messages(prompt=prompt, messages=messages)
+            options = self._build_options(
+                temperature=temperature,
+                num_predict=num_predict,
+            )
 
-        response = await client.post(
-            f"{self.ollama_host}/api/chat",
-            json={
-                "model": self.model,
-                "messages": chat_messages,
-                "stream": False,
-                "options": options,
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data.get("message", {}).get("content", "")
+            response = await client.post(
+                f"{self.ollama_host}/api/chat",
+                json={
+                    "model": self.model,
+                    "messages": chat_messages,
+                    "stream": False,
+                    "options": options,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get("message", {}).get("content", "")
 
     async def generate_stream(
         self,
@@ -123,7 +210,7 @@ class OllamaLLMClient:
         temperature: float = 0.7,
         num_predict: int = 1024,
     ) -> AsyncGenerator[str, None]:
-        """Generate a streaming response, yielding tokens.
+        """Generate a streaming response with concurrency limiting, yielding tokens.
 
         Args:
             prompt: Full prompt string (fallback if messages not supplied).
@@ -134,37 +221,38 @@ class OllamaLLMClient:
         Yields:
             Individual tokens as they are generated.
         """
-        client = await self._get_client()
-        chat_messages = self._prepare_messages(prompt=prompt, messages=messages)
-        options = self._build_options(
-            temperature=temperature,
-            num_predict=num_predict,
-        )
+        async with self.acquire_slot():
+            client = await self._get_client()
+            chat_messages = self._prepare_messages(prompt=prompt, messages=messages)
+            options = self._build_options(
+                temperature=temperature,
+                num_predict=num_predict,
+            )
 
-        async with client.stream(
-            "POST",
-            f"{self.ollama_host}/api/chat",
-            json={
-                "model": self.model,
-                "messages": chat_messages,
-                "stream": True,
-                "options": options,
-            },
-        ) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                    content = data.get("message", {}).get("content", "")
-                    if content:
-                        yield content
-                    if data.get("done", False):
-                        logger.debug("Ollama stream completed.")
-                        break
-                except json.JSONDecodeError:
-                    continue
+            async with client.stream(
+                "POST",
+                f"{self.ollama_host}/api/chat",
+                json={
+                    "model": self.model,
+                    "messages": chat_messages,
+                    "stream": True,
+                    "options": options,
+                },
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        content = data.get("message", {}).get("content", "")
+                        if content:
+                            yield content
+                        if data.get("done", False):
+                            logger.debug("Ollama stream completed.")
+                            break
+                    except json.JSONDecodeError:
+                        continue
 
     async def health_check(self) -> bool:
         """Check if Ollama is reachable and model is loaded."""
