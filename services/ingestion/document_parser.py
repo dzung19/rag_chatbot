@@ -126,27 +126,12 @@ def _parse_pptx(file_path: str) -> Generator[str, None, None]:
 
 
 def _parse_xlsx(file_path: str) -> Generator[str, None, None]:
-    """Parse XLSX using openpyxl. Yields text per sheet."""
-    from openpyxl import load_workbook
-
+    """Parse XLSX using dedicated ExcelParser. Yields clean markdown tables per sheet."""
     try:
-        wb = load_workbook(file_path, read_only=True, data_only=True)
-
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            sheet_lines = []
-
-            for row in ws.iter_rows(values_only=True):
-                row_data = [str(cell) if cell is not None else "" for cell in row]
-                row_text = " | ".join(row_data)
-                if row_text.strip() and row_text.replace("|", "").strip():
-                    sheet_lines.append(row_text)
-
-            if sheet_lines:
-                yield f"[Sheet: {sheet_name}]\n" + "\n".join(sheet_lines)
-
-        wb.close()
-
+        from excel_parser import parse_and_chunk_excel
+        text_pages, _ = parse_and_chunk_excel(file_path)
+        for page in text_pages:
+            yield page
     except Exception as e:
         logger.error("Failed to parse XLSX %s: %s", file_path, str(e))
         raise

@@ -7,7 +7,7 @@ Generates text embeddings using the nomic-embed-text model via Ollama's
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 
@@ -59,7 +59,10 @@ class EmbeddingClient:
         return data["embeddings"][0]
 
     async def embed_batch(
-        self, texts: list[str], batch_size: int = 32
+        self,
+        texts: list[str],
+        batch_size: int = 64,
+        on_progress: Optional[Callable[[int, int], None]] = None,
     ) -> list[list[float]]:
         """Generate embeddings for multiple texts in sub-batches.
 
@@ -69,6 +72,7 @@ class EmbeddingClient:
         Args:
             texts: List of texts to embed.
             batch_size: Number of texts per API call.
+            on_progress: Optional callback function(completed_count, total_count).
 
         Returns:
             List of embedding vectors.
@@ -89,6 +93,12 @@ class EmbeddingClient:
             response.raise_for_status()
             data = response.json()
             all_embeddings.extend(data["embeddings"])
+
+            if on_progress:
+                try:
+                    on_progress(min(i + len(batch), len(texts)), len(texts))
+                except Exception:
+                    pass
 
         return all_embeddings
 

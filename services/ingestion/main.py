@@ -197,6 +197,8 @@ async def _process_document(
     original_filename: str,
     doc_type: DocumentType,
     content_hash: str,
+    chunks: Optional[list[dict]] = None,
+    text_pages: Optional[list[str]] = None,
 ) -> None:
     """Background task: parse, chunk, embed, and store a document."""
     task_status = _ingestion_tasks.get(document_id)
@@ -204,35 +206,53 @@ async def _process_document(
         task_status.status = IngestionStatusEnum.PROCESSING
 
     try:
-        # 1. Parse document (yields per page/slide/sheet)
-        logger.info("Parsing document %s (%s)", document_id, original_filename)
-        text_pages = list(parse_document(str(file_path), doc_type.value))
-
-        if not text_pages:
-            raise ValueError("No text extracted from document.")
-
-        # 2. Chunk text per-page using Strategy 5 (structure-aware + contextual headers)
         settings = get_settings()
-        chunks = chunk_document_pages(
-            pages=text_pages,
-            chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
-            source_filename=original_filename,
-        )
-        logger.info(
-            "Document %s (%d pages) split into %d chunks",
-            document_id,
-            len(text_pages),
-            len(chunks),
-        )
+
+        # 1 & 2. Parse and chunk only if not already provided
+        if chunks is None or text_pages is None:
+            logger.info("Parsing document %s (%s)", document_id, original_filename)
+            if doc_type == DocumentType.XLSX:
+                from excel_parser import parse_and_chunk_excel
+                text_pages, chunks = parse_and_chunk_excel(
+                    file_path=str(file_path),
+                    source_filename=original_filename,
+                    chunk_chars=settings.excel_chunk_chars,
+                    max_rows_per_sheet=settings.excel_max_rows_per_sheet,
+                    max_cols=settings.excel_max_cols,
+                )
+            else:
+                text_pages = list(parse_document(str(file_path), doc_type.value))
+                if not text_pages:
+                    raise ValueError("No text extracted from document.")
+                chunks = chunk_document_pages(
+                    pages=text_pages,
+                    chunk_size=settings.chunk_size,
+                    chunk_overlap=settings.chunk_overlap,
+                    source_filename=original_filename,
+                )
+            logger.info(
+                "Document %s (%d pages) split into %d chunks",
+                document_id,
+                len(text_pages),
+                len(chunks),
+            )
 
         if task_status:
             task_status.total_chunks = len(chunks)
 
-        # 3. Generate embeddings
+        # 3. Generate embeddings with batching and progress tracking
         embed_client = _get_embed_client()
         chunk_texts = [c["text"] for c in chunks]
-        embeddings = await embed_client.embed_batch(chunk_texts)
+
+        def update_progress(done: int, total: int):
+            if task_status:
+                task_status.chunks_processed = done
+
+        embeddings = await embed_client.embed_batch(
+            chunk_texts,
+            batch_size=settings.embed_batch_size,
+            on_progress=update_progress,
+        )
         logger.info("Generated %d embeddings for document %s", len(embeddings), document_id)
 
         # 4. Store in Qdrant with enriched metadata & batching
@@ -244,23 +264,30 @@ async def _process_document(
         
         points = []
         for i, c in enumerate(chunks):
+            payload = {
+                "document_id": document_id,
+                "filename": original_filename,
+                "source": original_filename,
+                "chunk_index": c["chunk_index"],
+                "total_chunks": len(chunks),
+                "page": c.get("page", 0),
+                "heading": c.get("heading", ""),
+                "file_type": doc_type.value,
+                "ingested_at": ingested_at,
+                "text": chunk_texts[i],
+                "content_hash": content_hash,
+            }
+            # Carry over custom metadata (sheet, row_start, row_end, etc.)
+            if "metadata" in c and isinstance(c["metadata"], dict):
+                for meta_k, meta_v in c["metadata"].items():
+                    if meta_k not in payload:
+                        payload[meta_k] = meta_v
+
             points.append(
                 PointStruct(
                     id=str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{document_id}_chunk_{c['chunk_index']}")),
                     vector=embeddings[i],
-                    payload={
-                        "document_id": document_id,
-                        "filename": original_filename,
-                        "source": original_filename,
-                        "chunk_index": c["chunk_index"],
-                        "total_chunks": len(chunks),
-                        "page": c.get("page", 0),
-                        "heading": c.get("heading", ""),
-                        "file_type": doc_type.value,
-                        "ingested_at": ingested_at,
-                        "text": chunk_texts[i],
-                        "content_hash": content_hash
-                    }
+                    payload=payload,
                 )
             )
 
@@ -495,16 +522,30 @@ async def upload_document(
 
     # 4.1 Parse text and commit to SQLite immediately (instant availability for comparison & search)
     try:
-        text_pages = list(parse_document(str(file_path), doc_type.value))
+        if doc_type == DocumentType.XLSX:
+            from excel_parser import parse_and_chunk_excel
+            text_pages, chunks = parse_and_chunk_excel(
+                file_path=str(file_path),
+                source_filename=file.filename,
+                chunk_chars=settings.excel_chunk_chars,
+                max_rows_per_sheet=settings.excel_max_rows_per_sheet,
+                max_cols=settings.excel_max_cols,
+            )
+        else:
+            text_pages = list(parse_document(str(file_path), doc_type.value))
+            if not text_pages:
+                raise ValueError("No text extracted from document.")
+            chunks = chunk_document_pages(
+                pages=text_pages,
+                chunk_size=settings.chunk_size,
+                chunk_overlap=settings.chunk_overlap,
+                source_filename=file.filename,
+            )
+
         if not text_pages:
             raise ValueError("No text extracted from document.")
+
         full_text = "\n\n".join(p.strip() for p in text_pages if p and p.strip())
-        chunks = chunk_document_pages(
-            pages=text_pages,
-            chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
-            source_filename=file.filename,
-        )
         save_document_full_and_chunks(
             document_id=document_id,
             filename=file.filename,
@@ -554,7 +595,14 @@ async def upload_document(
 
     # 7. Queue background processing (embeddings and Qdrant vector indexing)
     background_tasks.add_task(
-        _process_document, document_id, file_path, file.filename, doc_type, content_hash
+        _process_document,
+        document_id,
+        file_path,
+        file.filename,
+        doc_type,
+        content_hash,
+        chunks=chunks,
+        text_pages=text_pages,
     )
 
     return DocumentUploadResponse(

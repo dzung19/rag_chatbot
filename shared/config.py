@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     chunk_overlap: int = Field(default=200, ge=0, le=1000)
     max_upload_size_mb: int = Field(default=50, ge=1, le=200)
     sqlite_db_path: str = Field(default_factory=_default_sqlite_db_path)
+    excel_chunk_chars: int = Field(default=1500, ge=300, le=10000)
+    excel_max_rows_per_sheet: int = Field(default=20000, ge=100)
+    excel_max_cols: int = Field(default=50, ge=5, le=500)
+    embed_batch_size: int = Field(default=64, ge=8, le=256)
 
     # --- Downstream Service URLs ---
     ingestion_service_url: str = Field(default="http://localhost:8001")

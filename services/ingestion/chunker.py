@@ -30,6 +30,9 @@ def _is_heading(line: str) -> bool:
     stripped = line.strip()
     if not stripped or len(stripped) > 150:
         return False
+    # Table rows (delimited by " | " or Markdown "| ... |") are data, not structural headings
+    if " | " in stripped or (stripped.startswith("|") and stripped.endswith("|")):
+        return False
     # Check regex patterns
     if any(re.match(pattern, stripped, re.IGNORECASE) for pattern in HEADING_PATTERNS):
         return True
