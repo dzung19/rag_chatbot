@@ -25,7 +25,7 @@ export const Sidebar: React.FC = () => {
     conversations,
     order,
     activeId,
-    newConversation,
+    resetActive,
     deleteConversation,
     renameConversation,
     loadConversations,
@@ -38,9 +38,14 @@ export const Sidebar: React.FC = () => {
     loadConversations();
   }, [loadConversations]);
 
+  const handleBrandClick = () => {
+    resetActive();
+    navigate("/");
+  };
+
   const handleNewChat = () => {
-    const id = newConversation();
-    navigate(`/c/${id}`);
+    resetActive();
+    navigate("/");
   };
 
   const handleSelectConv = (id: string) => {
@@ -78,7 +83,7 @@ export const Sidebar: React.FC = () => {
           {!sidebarCollapsed && (
             <button 
               className={styles.brandLink}
-              onClick={() => navigate("/")}
+              onClick={handleBrandClick}
               title="Home"
               type="button"
             >
@@ -111,12 +116,21 @@ export const Sidebar: React.FC = () => {
       {!sidebarCollapsed && (
         <div className={styles.recentSection}>
           <div className={styles.recentHeader}>Recent</div>
-          {order.length === 0 ? (
-            <div style={{ padding: "0.5rem 0.75rem", fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>
-              No conversations yet
-            </div>
-          ) : (
-            order.map((id) => {
+          {(() => {
+            const visibleOrder = order.filter((id) => {
+              const conv = conversations[id];
+              return conv && ((conv.messages && conv.messages.length > 0) || conv.title !== "New chat");
+            });
+
+            if (visibleOrder.length === 0) {
+              return (
+                <div style={{ padding: "0.5rem 0.75rem", fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>
+                  No conversations yet
+                </div>
+              );
+            }
+
+            return visibleOrder.map((id) => {
               const conv = conversations[id];
               if (!conv) return null;
               const isActive = activeId === id;
@@ -164,8 +178,8 @@ export const Sidebar: React.FC = () => {
                   )}
                 </div>
               );
-            })
-          )}
+            });
+          })()}
         </div>
       )}
 

@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect } from "react";
+import { useNavigate, useParams } from "react-router";
 import { Plus, ArrowUp, Square, GitCompare } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore";
 import { useToastStore } from "../../stores/toastStore";
@@ -11,7 +12,9 @@ import { MAX_INPUT_CHARS, MAX_CHAT_FILES } from "../../lib/constants";
 import styles from "./Composer.module.css";
 
 export const Composer: React.FC = () => {
-  const { sendMessage, isStreaming, stopStreaming, activeId, conversations } = useChatStore();
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const { sendMessage, isStreaming, stopStreaming, activeId, conversations, newConversation } = useChatStore();
   const { pushToast } = useToastStore();
   const { activeMainSkillId } = useSkillStore();
 
@@ -77,6 +80,12 @@ export const Composer: React.FC = () => {
     setAttachedFiles([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
+    }
+
+    let targetId = id;
+    if (!targetId) {
+      targetId = newConversation();
+      navigate(`/c/${targetId}`, { replace: true });
     }
 
     await sendMessage(trimmed, filesToSend);

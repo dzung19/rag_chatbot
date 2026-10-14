@@ -23,6 +23,7 @@ interface ChatState {
   isLoading: boolean;
 
   newConversation: () => string;
+  resetActive: () => void;
   loadConversations: () => Promise<void>;
   selectConversation: (id: string) => Promise<void>;
   renameConversation: (id: string, newTitle: string) => Promise<void>;
@@ -90,6 +91,25 @@ export const useChatStore = create<ChatState>()(
       isLoading: false,
 
       newConversation: () => {
+        const state = get();
+        // 1. If currently active conversation is empty (0 messages), reuse it
+        if (state.activeId) {
+          const current = state.conversations[state.activeId];
+          if (current && (!current.messages || current.messages.length === 0)) {
+            return state.activeId;
+          }
+        }
+
+        // 2. Prune any orphaned empty conversations from state
+        const nextConvs = { ...state.conversations };
+        let hasPruned = false;
+        for (const [convId, conv] of Object.entries(nextConvs)) {
+          if (!conv.messages || conv.messages.length === 0) {
+            delete nextConvs[convId];
+            hasPruned = true;
+          }
+        }
+
         const id = generateUuid();
         const newConv: Conversation = {
           id,
@@ -97,14 +117,38 @@ export const useChatStore = create<ChatState>()(
           messages: [],
           updatedAt: Date.now(),
         };
+        nextConvs[id] = newConv;
 
-        set((state) => ({
-          conversations: { ...state.conversations, [id]: newConv },
-          order: [id, ...state.order.filter((x) => x !== id)],
+        // Note: New empty chat is not shown in history order until the first message is sent
+        const nextOrder = hasPruned
+          ? state.order.filter((x) => !!nextConvs[x] && x !== id)
+          : state.order.filter((x) => x !== id);
+
+        set({
+          conversations: nextConvs,
+          order: nextOrder,
           activeId: id,
-        }));
+        });
 
         return id;
+      },
+
+      resetActive: () => {
+        const state = get();
+        const nextConvs = { ...state.conversations };
+        let nextOrder = state.order;
+        if (state.activeId) {
+          const current = nextConvs[state.activeId];
+          if (current && (!current.messages || current.messages.length === 0)) {
+            delete nextConvs[state.activeId];
+            nextOrder = nextOrder.filter((x) => x !== state.activeId);
+          }
+        }
+        set({
+          conversations: nextConvs,
+          order: nextOrder,
+          activeId: null,
+        });
       },
 
       loadConversations: async () => {
@@ -134,8 +178,21 @@ export const useChatStore = create<ChatState>()(
               }
             }
 
-            // Keep local-only conversations (e.g. freshly created blank chats) at the top
-            const localOnly = state.order.filter((id) => !backendOrder.includes(id));
+            // Prune local-only empty conversations (cleans up legacy localStorage "New chat" rác)
+            for (const [id, conv] of Object.entries(nextConvs)) {
+              if (
+                !backendOrder.includes(id) &&
+                (!conv.messages || conv.messages.length === 0) &&
+                id !== state.activeId
+              ) {
+                delete nextConvs[id];
+              }
+            }
+
+            // Only keep local-only conversations in order if they actually have messages
+            const localOnly = state.order.filter(
+              (id) => !backendOrder.includes(id) && !!nextConvs[id] && nextConvs[id].messages && nextConvs[id].messages.length > 0
+            );
             const newOrder = [...localOnly, ...backendOrder];
 
             return {
@@ -150,8 +207,24 @@ export const useChatStore = create<ChatState>()(
 
       selectConversation: async (id: string) => {
         const state = get();
-        if (state.conversations[id]) {
-          set({ activeId: id });
+
+        // If switching away from an empty conversation, prune that empty conversation
+        const nextConvs = { ...state.conversations };
+        let nextOrder = state.order;
+        if (state.activeId && state.activeId !== id) {
+          const currentActive = nextConvs[state.activeId];
+          if (currentActive && (!currentActive.messages || currentActive.messages.length === 0)) {
+            delete nextConvs[state.activeId];
+            nextOrder = nextOrder.filter((x) => x !== state.activeId);
+          }
+        }
+
+        if (nextConvs[id]) {
+          set({
+            conversations: nextConvs,
+            order: nextOrder,
+            activeId: id,
+          });
         }
 
         // Avoid overwriting conversation state if currently streaming this conversation
@@ -177,14 +250,14 @@ export const useChatStore = create<ChatState>()(
               selectedDocumentIds: prev?.selectedDocumentIds,
             };
 
-            const nextOrder = s.order.includes(id) ? s.order : [id, ...s.order];
+            const updatedOrder = s.order.includes(id) ? s.order : [id, ...s.order];
 
             return {
               conversations: {
                 ...s.conversations,
                 [id]: updatedConv,
               },
-              order: nextOrder,
+              order: updatedOrder,
               activeId: id,
             };
           });
@@ -329,9 +402,11 @@ export const useChatStore = create<ChatState>()(
           const conv = state.conversations[activeId!];
           isFirstMessage = conv.messages.filter((m) => m.role === "user").length === 0;
           nextTitle = isFirstMessage ? titleFromQuery(trimmedQuery) : conv.title;
+          const nextOrder = [activeId!, ...state.order.filter((x) => x !== activeId!)];
 
           return {
             isStreaming: true,
+            order: nextOrder,
             conversations: {
               ...state.conversations,
               [activeId!]: {

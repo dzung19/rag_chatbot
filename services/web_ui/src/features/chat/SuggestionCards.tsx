@@ -1,4 +1,5 @@
 import React from "react";
+import { useNavigate, useParams } from "react-router";
 import { ListChecks, NotebookPen, Search, Lightbulb } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore";
 import styles from "./SuggestionCards.module.css";
@@ -8,7 +9,9 @@ interface SuggestionCardsProps {
 }
 
 export const SuggestionCards: React.FC<SuggestionCardsProps> = ({ onSelectPrompt }) => {
-  const { sendMessage } = useChatStore();
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const { sendMessage, newConversation } = useChatStore();
 
   const suggestions = [
     {
@@ -33,6 +36,11 @@ export const SuggestionCards: React.FC<SuggestionCardsProps> = ({ onSelectPrompt
     if (onSelectPrompt) {
       onSelectPrompt(text);
     } else {
+      let targetId = id;
+      if (!targetId) {
+        targetId = newConversation();
+        navigate(`/c/${targetId}`, { replace: true });
+      }
       sendMessage(text);
     }
   };
