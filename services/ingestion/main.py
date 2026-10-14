@@ -10,11 +10,16 @@ import os
 import sys
 import uuid
 import hashlib
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from qdrant_client.models import Filter, FieldCondition, MatchValue
+import hmac
+from orphan_cleanup import run_orphan_cleanup
+from dataclasses import asdict
+
 
 from fastapi import (
     BackgroundTasks,
@@ -24,6 +29,7 @@ from fastapi import (
     HTTPException,
     UploadFile,
     status,
+    Header, Query
 )
 from fastapi.responses import JSONResponse
 
@@ -185,7 +191,13 @@ def _ensure_collection():
 
         _qdrant_collection_checked = True
 
+class DocumentCancelledError(Exception):
+    """Document bị xóa trong lúc đang ingest."""
 
+
+def _ensure_not_cancelled(document_id: str) -> None:
+    if document_id not in _documents:
+        raise DocumentCancelledError(document_id)
 
 # ---------------------------------------------------------------------------
 # Background Ingestion Task
@@ -199,6 +211,7 @@ async def _process_document(
     content_hash: str,
     chunks: Optional[list[dict]] = None,
     text_pages: Optional[list[str]] = None,
+    sqlite_saved: bool = False,
 ) -> None:
     """Background task: parse, chunk, embed, and store a document."""
     task_status = _ingestion_tasks.get(document_id)
@@ -213,7 +226,8 @@ async def _process_document(
             logger.info("Parsing document %s (%s)", document_id, original_filename)
             if doc_type == DocumentType.XLSX:
                 from excel_parser import parse_and_chunk_excel
-                text_pages, chunks = parse_and_chunk_excel(
+                text_pages, chunks = await asyncio.to_thread(
+                    parse_and_chunk_excel,
                     file_path=str(file_path),
                     source_filename=original_filename,
                     chunk_chars=settings.excel_chunk_chars,
@@ -259,9 +273,9 @@ async def _process_document(
         client = _get_qdrant_client()
         _ensure_collection()
         ingested_at = datetime.now(timezone.utc).isoformat()
-        
+
         from qdrant_client.models import PointStruct
-        
+
         points = []
         for i, c in enumerate(chunks):
             payload = {
@@ -291,29 +305,36 @@ async def _process_document(
                 )
             )
 
+        _ensure_not_cancelled(document_id)
+
         # Batch upsert to Qdrant
         qdrant_batch_size = 100
         for i in range(0, len(points), qdrant_batch_size):
             b_slice = slice(i, i + qdrant_batch_size)
-            client.upsert(
-                collection_name=settings.qdrant_collection,
-                points=points[b_slice]
+            await asyncio.to_thread(
+                client.upsert,
+                collection_name=settings.qdrant_collection, 
+                points=points[b_slice], 
+                wait = True
             )
 
         # 4.5. Ensure SQLite has both full_documents and document_chunks
-        try:
+        if not sqlite_saved:
             full_text = "\n\n".join(p.strip() for p in text_pages if p and p.strip())
             save_document_full_and_chunks(
-                document_id=document_id,
-                filename=original_filename,
-                full_text=full_text,
-                page_count=len(text_pages),
-                file_size_bytes=file_path.stat().st_size if file_path.exists() else 0,
-                file_type=doc_type.value,
-                chunks=chunks,
-            )
-        except Exception as sqlite_err:
-            logger.error("Failed to insert into SQLite: %s", str(sqlite_err))
+                    document_id=document_id,
+                    filename=original_filename,
+                    full_text=full_text,
+                    page_count=len(text_pages),
+                    file_size_bytes=file_path.stat().st_size if file_path.exists() else 0,
+                    file_type=doc_type.value,
+                    chunks=chunks,
+                )
+        else:
+            logger.info("SQLite already populated at upload, skipping. document_id=%s",
+                document_id,)
+
+        _ensure_not_cancelled(document_id)
 
         # 5. Update status
         if task_status:
@@ -331,13 +352,55 @@ async def _process_document(
             len(chunks),
         )
 
+    except DocumentCancelledError:
+        logger.info("Ingestion cancelled because document was deleted: %s", document_id)
+        # Dọn những gì đã ghi sau khi endpoint delete chạy
+        try:
+            await asyncio.to_thread(
+                _get_qdrant_client().delete,
+                collection_name=get_settings().qdrant_collection,
+                points_selector=Filter(must=[
+                    FieldCondition(key="document_id", match=MatchValue(value=document_id))
+                ]),
+                wait=True,
+            )
+            await asyncio.to_thread(delete_document_from_sqlite, document_id)
+        except Exception:
+            logger.exception("Cleanup after cancel failed: %s", document_id)
+        # Không gán FAILED, không thêm lại vào _documents
+
     except Exception as e:
         logger.error("Failed to ingest document %s: %s", document_id, str(e))
+
+        try:
+            await asyncio.to_thread(
+                _get_qdrant_client().delete,
+                collection_name=get_settings().qdrant_collection,
+                points_selector=Filter(must=[
+                    FieldCondition(
+                        key="document_id",
+                        match=MatchValue(value=document_id),
+                    )
+                ]),
+                wait=True,
+        )
+        except Exception:
+            logger.exception("Failed to clean Qdrant for document %s", document_id)
+
+        try:
+            await asyncio.to_thread(delete_document_from_sqlite, document_id)
+        except Exception:
+            logger.exception(
+                "Failed to clean SQLite for document %s", document_id
+            )
+
         if _hash_index.get(content_hash) == document_id:
             _hash_index.pop(content_hash, None)
+
         if task_status:
             task_status.status = IngestionStatusEnum.FAILED
             task_status.error_message = str(e)
+
         if document_id in _documents:
             _documents[document_id].status = IngestionStatusEnum.FAILED
 
@@ -524,7 +587,9 @@ async def upload_document(
     try:
         if doc_type == DocumentType.XLSX:
             from excel_parser import parse_and_chunk_excel
-            text_pages, chunks = parse_and_chunk_excel(
+
+            text_pages, chunks = await asyncio.to_thread(
+                parse_and_chunk_excel,
                 file_path=str(file_path),
                 source_filename=file.filename,
                 chunk_chars=settings.excel_chunk_chars,
@@ -546,7 +611,8 @@ async def upload_document(
             raise ValueError("No text extracted from document.")
 
         full_text = "\n\n".join(p.strip() for p in text_pages if p and p.strip())
-        save_document_full_and_chunks(
+        await asyncio.to_thread(
+            save_document_full_and_chunks,
             document_id=document_id,
             filename=file.filename,
             full_text=full_text,
@@ -603,6 +669,7 @@ async def upload_document(
         content_hash,
         chunks=chunks,
         text_pages=text_pages,
+        sqlite_saved=True
     )
 
     return DocumentUploadResponse(
@@ -675,6 +742,56 @@ async def delete_document(document_id: str):
 
     return JSONResponse(content={"message": "Document deleted successfully."})
 
+_cleanup_lock = asyncio.Lock()
+
+
+def _is_processing(doc_id: str) -> bool:
+    task = _ingestion_tasks.get(doc_id)
+    return task is not None and task.status in (
+        IngestionStatusEnum.PENDING,
+        IngestionStatusEnum.PROCESSING,
+    )
+
+@app.post("/ingest/internal/cleanup")
+async def cleanup_orphans(
+    dry_run: bool = True,
+    grace_hours: int = Query(default=24, ge=6, le=720),
+    max_delete: int = Query(default=50, ge=1, le=1000),
+    x_internal_service_key: str = Header(default=""),
+):
+    """Dọn dữ liệu mồ côi giữa Qdrant, SQLite và uploaded_docs."""
+    settings = get_settings()
+    expected_key = settings.internal_service_key or ""
+
+    if not expected_key or not hmac.compare_digest(
+        x_internal_service_key, expected_key
+    ):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if _cleanup_lock.locked():
+        raise HTTPException(status_code=409, detail="Cleanup is already running.")
+
+    async with _cleanup_lock:
+        report = await asyncio.to_thread(
+            run_orphan_cleanup,
+            qdrant_client=_get_qdrant_client(),
+            collection=settings.qdrant_collection,
+            upload_dir=UPLOAD_DIR,
+            is_processing=_is_processing,
+            dry_run=dry_run,
+            grace_hours=grace_hours,
+            max_delete=max_delete,
+        )
+
+    # Đồng bộ lại trạng thái trong RAM.
+    for doc_id in report.deleted_ids:
+        _documents.pop(doc_id, None)
+        _ingestion_tasks.pop(doc_id, None)
+        for content_hash, mapped_id in list(_hash_index.items()):
+            if mapped_id == doc_id:
+                del _hash_index[content_hash]
+
+    return asdict(report)
 
 @app.get("/ingest/health", response_model=ServiceHealth)
 async def health_check():

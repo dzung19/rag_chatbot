@@ -30,6 +30,7 @@ from retriever import Retriever
 from prompt_builder import build_rag_messages, build_rag_prompt
 from llm_client import OllamaLLMClient
 from shared import skills_repo
+from contextlib import aclosing
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -410,13 +411,15 @@ async def query_stream(request: ChatRequest):
 
             # 3. Stream LLM response through the arrow cleaner
             llm = _get_llm_client()
-            token_gen = llm.generate_stream(
-                messages=messages,
-                temperature=temperature,
-            )
-
-            async for token in _clean_stream_tokens(token_gen):
-                yield {"event": "token", "data": json.dumps(token)}
+            async with aclosing(
+                llm.generate_stream(
+                    messages=messages,
+                    temperature=request.temperature,
+                )
+            ) as token_gen:
+                async with aclosing(_clean_stream_tokens(token_gen)) as cleaned:
+                    async for token in cleaned:
+                        yield {"event": "token", "data": json.dumps(token)}
 
             yield {"event": "done", "data": ""}
 

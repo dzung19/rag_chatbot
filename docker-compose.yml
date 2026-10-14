@@ -37,15 +37,19 @@ services:
   ollama-init:
     image: ollama/ollama:latest
     container_name: rag-ollama-init
+
+    profiles:
+      - model-init
+
     depends_on:
       ollama:
         condition: service_healthy
     entrypoint: >
       sh -c "
         echo 'Pulling Gemma 4 E4B model...' &&
-        ollama pull gemma4:e4b &&
+        ollama pull gemma4:latest &&
         echo 'Pulling nomic-embed-text model...' &&
-        ollama pull nomic-embed-text &&
+        ollama pull nomic-embed-text-v2-moe:latest &&
         echo 'Models ready!'
       "
     environment:

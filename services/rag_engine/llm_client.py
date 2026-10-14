@@ -17,6 +17,8 @@ import httpx  # type: ignore[import]
 
 logger = logging.getLogger(__name__)
 
+class LLMQueueTimeoutError(TimeoutError):
+    pass
 
 class OllamaLLMClient:
     """Async client for Ollama LLM inference with concurrency control."""
@@ -24,7 +26,7 @@ class OllamaLLMClient:
     def __init__(
         self,
         ollama_host: str = "http://ollama:11434",
-        model: str = "gemma4:e4b",
+        model: str = "gemma4:lastest",
         timeout: int = 300,
         num_threads: Optional[int] = None,
         max_concurrency: int = 3,
@@ -67,56 +69,42 @@ class OllamaLLMClient:
         Times out if waiting exceeds queue_timeout seconds.
         """
         sem = self._get_semaphore()
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-
-        async with self._lock:
-            self._waiting_count += 1
-            waiting = self._waiting_count
-            active = self._active_count
-
-        if active >= self.max_concurrency:
-            logger.warning(
-                "LLM concurrency limit reached (%d/%d active). Request queued (position: #%d).",
-                active,
-                self.max_concurrency,
-                waiting,
-            )
-
-        acquired = False
+        self._waiting_count += 1
         try:
+            if self._active_count >= self.max_concurrency:
+                logger.warning(
+                    "LLM busy (%d/%d active, %d waiting). Request queued.",
+                    self._active_count,
+                    self.max_concurrency,
+                    self._waiting_count,
+                )
             try:
-                await asyncio.wait_for(sem.acquire(), timeout=self.queue_timeout)
-                acquired = True
-            except asyncio.TimeoutError:
+                async with asyncio.timeout(self.queue_timeout):
+                    await sem.acquire()
+            except TimeoutError as error:
                 logger.error(
                     "LLM queue timeout after %ds (active: %d, waiting: %d)",
                     self.queue_timeout,
                     self._active_count,
                     self._waiting_count,
                 )
-                raise TimeoutError(
+                raise LLMQueueTimeoutError(
                     f"LLM request timed out waiting in queue ({self.queue_timeout}s)."
-                )
+                ) from error
+        finally:
+            # Luôn giảm đúng 1 lần, dù acquire thành công, timeout hay bị hủy.
+            self._waiting_count -= 1
 
-            async with self._lock:
-                self._waiting_count = max(0, self._waiting_count - 1)
-                self._active_count += 1
-
+        self._active_count += 1
+        try:
             yield {
                 "active": self._active_count,
                 "waiting": self._waiting_count,
             }
         finally:
-            if acquired:
-                sem.release()
-                if self._lock:
-                    async with self._lock:
-                        self._active_count = max(0, self._active_count - 1)
-            else:
-                if self._lock:
-                    async with self._lock:
-                        self._waiting_count = max(0, self._waiting_count - 1)
+            # Luôn trả slot đúng 1 lần.
+            self._active_count -= 1
+            sem.release()
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
