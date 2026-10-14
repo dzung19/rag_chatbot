@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     excel_max_rows_per_sheet: int = Field(default=20000, ge=100)
     excel_max_cols: int = Field(default=50, ge=5, le=500)
     embed_batch_size: int = Field(default=64, ge=8, le=256)
+    database_url: str | None = Field(default=None, description="PostgreSQL database URL for persistent ingestion state")
 
     # --- Downstream Service URLs ---
     ingestion_service_url: str = Field(default="http://localhost:8001")

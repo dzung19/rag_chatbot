@@ -57,6 +57,7 @@ from shared.sqlite_db import (
 from document_parser import parse_document
 from chunker import chunk_text, chunk_document_pages
 from embeddings import EmbeddingClient
+from state_store import get_state_store
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -67,8 +68,15 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Reconstruct document metadata cache from Qdrant on startup
-    _reconstruct_documents_from_qdrant()
+    # 1. Initialize PostgreSQL state store tables & partial indices
+    store = get_state_store()
+    store.init_db()
+
+    # 2. Mark any dangling/interrupted tasks from previous crash as failed
+    store.clean_interrupted_tasks(grace_minutes=10)
+
+    # 3. Backfill document metadata from Qdrant into PostgreSQL if missing
+    _backfill_from_qdrant()
     yield
 
 app = FastAPI(
@@ -111,13 +119,8 @@ except Exception:
     UPLOAD_DIR = Path(__file__).parent.parent.parent / "uploaded_docs"
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# In-memory document metadata store (replace with DB in production)
-_documents: dict[str, DocumentInfo] = {}
-_ingestion_tasks: dict[str, IngestionStatus] = {}
-
 # Embedding client singleton
 _embed_client: Optional[EmbeddingClient] = None
-_hash_index: dict[str, str] = {}
 
 
 def _get_embed_client() -> EmbeddingClient:
@@ -196,7 +199,7 @@ class DocumentCancelledError(Exception):
 
 
 def _ensure_not_cancelled(document_id: str) -> None:
-    if document_id not in _documents:
+    if get_state_store().is_cancelled(document_id):
         raise DocumentCancelledError(document_id)
 
 # ---------------------------------------------------------------------------
@@ -214,9 +217,7 @@ async def _process_document(
     sqlite_saved: bool = False,
 ) -> None:
     """Background task: parse, chunk, embed, and store a document."""
-    task_status = _ingestion_tasks.get(document_id)
-    if task_status:
-        task_status.status = IngestionStatusEnum.PROCESSING
+    store = get_state_store()
 
     try:
         settings = get_settings()
@@ -251,16 +252,14 @@ async def _process_document(
                 len(chunks),
             )
 
-        if task_status:
-            task_status.total_chunks = len(chunks)
+        store.update_progress(document_id, chunks_processed=0, total_chunks=len(chunks))
 
         # 3. Generate embeddings with batching and progress tracking
         embed_client = _get_embed_client()
         chunk_texts = [c["text"] for c in chunks]
 
         def update_progress(done: int, total: int):
-            if task_status:
-                task_status.chunks_processed = done
+            store.update_progress(document_id, chunks_processed=done, total_chunks=total)
 
         embeddings = await embed_client.embed_batch(
             chunk_texts,
@@ -337,14 +336,7 @@ async def _process_document(
         _ensure_not_cancelled(document_id)
 
         # 5. Update status
-        if task_status:
-            task_status.status = IngestionStatusEnum.COMPLETED
-            task_status.chunks_processed = len(chunks)
-
-        if document_id in _documents:
-            _documents[document_id].status = IngestionStatusEnum.COMPLETED
-            _documents[document_id].chunk_count = len(chunks)
-            _documents[document_id].updated_at = datetime.now(timezone.utc)
+        store.mark_completed(document_id, len(chunks))
 
         logger.info(
             "Document %s ingested successfully: %d chunks stored",
@@ -367,7 +359,7 @@ async def _process_document(
             await asyncio.to_thread(delete_document_from_sqlite, document_id)
         except Exception:
             logger.exception("Cleanup after cancel failed: %s", document_id)
-        # Không gán FAILED, không thêm lại vào _documents
+        # Không gán FAILED, không thêm lại vào store vì row đã bị xóa
 
     except Exception as e:
         logger.error("Failed to ingest document %s: %s", document_id, str(e))
@@ -394,29 +386,24 @@ async def _process_document(
                 "Failed to clean SQLite for document %s", document_id
             )
 
-        if _hash_index.get(content_hash) == document_id:
-            _hash_index.pop(content_hash, None)
-
-        if task_status:
-            task_status.status = IngestionStatusEnum.FAILED
-            task_status.error_message = str(e)
-
-        if document_id in _documents:
-            _documents[document_id].status = IngestionStatusEnum.FAILED
+        store.mark_failed(document_id, str(e))
 
 
-def _reconstruct_documents_from_qdrant() -> None:
-    """Reconstruct in-memory document metadata from Qdrant on startup."""
+def _backfill_from_qdrant() -> None:
+    """Backfill document metadata from Qdrant into PostgreSQL if missing."""
     try:
+        store = get_state_store()
+        existing_docs = {d.document_id for d in store.list_documents()}
+
         client = _get_qdrant_client()
         settings = get_settings()
         _ensure_collection()
-        
+
         # Qdrant scroll API to fetch all payload points
         offset = None
         doc_groups = {}
         doc_hashes: dict[str, str] = {}
-        
+
         while True:
             points, offset = client.scroll(
                 collection_name=settings.qdrant_collection,
@@ -425,7 +412,7 @@ def _reconstruct_documents_from_qdrant() -> None:
                 with_vectors=False,
                 offset=offset,
             )
-            
+
             for point in points:
                 meta = point.payload
                 if not meta or "document_id" not in meta:
@@ -436,12 +423,15 @@ def _reconstruct_documents_from_qdrant() -> None:
                     doc_groups[doc_id] = filename
                     if meta.get("content_hash"):
                         doc_hashes[doc_id] = meta["content_hash"]
-                
+
             if offset is None:
                 break
 
-        # Reconstruct DocumentInfo for each unique document
+        backfilled_count = 0
         for doc_id, filename in doc_groups.items():
+            if doc_id in existing_docs:
+                continue
+
             ext = Path(filename).suffix.lower()
             file_path = UPLOAD_DIR / f"{doc_id}{ext}"
             doc_filter = Filter(
@@ -458,28 +448,12 @@ def _reconstruct_documents_from_qdrant() -> None:
                     points=doc_filter,
                 )
 
-            if content_hash:
-                if content_hash in _hash_index:
-                    logger.warning(
-                        "Duplicate document detected: %s ('%s') duplicates %s. "
-                        "Consider deleting it.",
-                        doc_id,
-                        filename,
-                        _hash_index[content_hash],
-                    )
-                else:
-                    _hash_index[content_hash] = doc_id
             size_bytes = 0
             created_at = datetime.now(timezone.utc)
             if file_path.exists():
                 size_bytes = file_path.stat().st_size
                 created_at = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
-                
-            # Note: Count might be hard to calculate precisely without a DB-side aggregation
-            # Let's approximate or leave at 0 if exact count is not necessary.
-            # To be accurate we could issue a count query per doc_id.
-            # But since we just need basic info, let's just create it with chunk_count=0
-            # or do a count request
+
             count_result = client.count(
                 collection_name=settings.qdrant_collection,
                 count_filter=Filter(
@@ -493,27 +467,22 @@ def _reconstruct_documents_from_qdrant() -> None:
             )
             chunk_count = count_result.count
             doc_type = ALLOWED_EXTENSIONS.get(ext, DocumentType.TXT)
-            
-            _documents[doc_id] = DocumentInfo(
+
+            store.upsert_reconstructed_document(
                 document_id=doc_id,
                 filename=filename,
-                file_type=doc_type,
+                file_type=doc_type.value,
                 file_size_bytes=size_bytes,
+                content_hash=content_hash or f"legacy_{doc_id}",
                 chunk_count=chunk_count,
-                status=IngestionStatusEnum.COMPLETED,
                 created_at=created_at,
             )
-            # Reconstruct the task tracking status as completed
-            _ingestion_tasks[doc_id] = IngestionStatus(
-                document_id=doc_id,
-                status=IngestionStatusEnum.COMPLETED,
-                chunks_processed=chunk_count,
-                total_chunks=chunk_count,
-            )
-        if doc_groups:
-            logger.info("Successfully reconstructed metadata for %d documents from Qdrant.", len(doc_groups))
+            backfilled_count += 1
+
+        if backfilled_count > 0:
+            logger.info("Successfully backfilled metadata for %d documents from Qdrant into PostgreSQL.", backfilled_count)
     except Exception as e:
-        logger.error("Failed to reconstruct document metadata from Qdrant: %s", str(e))
+        logger.error("Failed to backfill document metadata from Qdrant: %s", str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -553,27 +522,26 @@ async def upload_document(
         )
     
     content_hash = _compute_hash(content)
-    existing_id = _hash_index.get(content_hash)
-    if existing_id:
-        existing = _documents.get(existing_id)
-        if existing and existing.status != IngestionStatusEnum.FAILED:
-            conn = get_sqlite_connection()
-            cur = conn.execute("SELECT 1 FROM full_documents WHERE document_id = ?", (existing_id,))
-            in_sqlite = cur.fetchone() is not None
-            conn.close()
-            if in_sqlite:
-                logger.info(
-                    "Duplicate upload '%s' -> reuse document %s (verified in SQLite)",
-                    file.filename,
-                    existing_id,
-                )
-                return DocumentUploadResponse(
-                    document_id=existing_id,
-                    filename=existing.filename,
-                    status=existing.status,
-                )
-        # Bản cũ lỗi hoặc chưa có trong SQLite: cho phép upload lại
-        _hash_index.pop(content_hash, None)
+    store = get_state_store()
+
+    # Check for existing document in PostgreSQL
+    existing = store.get_document_by_hash(content_hash)
+    if existing and existing.status != IngestionStatusEnum.FAILED:
+        conn = get_sqlite_connection()
+        cur = conn.execute("SELECT 1 FROM full_documents WHERE document_id = ?", (existing.document_id,))
+        in_sqlite = cur.fetchone() is not None
+        conn.close()
+        if in_sqlite:
+            logger.info(
+                "Duplicate upload '%s' -> reuse document %s (verified in SQLite)",
+                file.filename,
+                existing.document_id,
+            )
+            return DocumentUploadResponse(
+                document_id=existing.document_id,
+                filename=existing.filename,
+                status=existing.status,
+            )
 
     # 4. Save with UUID filename (original name stored in metadata only)
     document_id = str(uuid.uuid4())
@@ -638,28 +606,25 @@ async def upload_document(
         len(chunks),
     )
 
-    # 5. Create metadata record
-    doc_info = DocumentInfo(
+    # 5. Atomically claim document in PostgreSQL
+    doc_info, is_new = store.claim_document(
         document_id=document_id,
         filename=file.filename,
-        file_type=doc_type,
+        doc_type=doc_type.value,
         file_size_bytes=len(content),
-        chunk_count=len(chunks),
-        status=IngestionStatusEnum.PROCESSING,
-        created_at=datetime.now(timezone.utc),
+        content_hash=content_hash,
     )
-    _documents[document_id] = doc_info
-    _hash_index[content_hash] = document_id
+    if not is_new:
+        logger.info("Concurrent duplicate upload detected for %s -> reuse %s", file.filename, doc_info.document_id)
+        return DocumentUploadResponse(
+            document_id=doc_info.document_id,
+            filename=doc_info.filename,
+            status=doc_info.status,
+        )
 
-    # 6. Create ingestion task tracker
-    _ingestion_tasks[document_id] = IngestionStatus(
-        document_id=document_id,
-        status=IngestionStatusEnum.PROCESSING,
-        total_chunks=len(chunks),
-        chunks_processed=0,
-    )
+    store.update_progress(document_id, chunks_processed=0, total_chunks=len(chunks))
 
-    # 7. Queue background processing (embeddings and Qdrant vector indexing)
+    # 6. Queue background processing (embeddings and Qdrant vector indexing)
     background_tasks.add_task(
         _process_document,
         document_id,
@@ -682,29 +647,32 @@ async def upload_document(
 @app.get("/ingest/documents", response_model=DocumentListResponse)
 async def list_documents():
     """List all indexed documents."""
-    docs = list(_documents.values())
+    docs = get_state_store().list_documents()
     return DocumentListResponse(documents=docs, total=len(docs))
 
 
 @app.get("/ingest/documents/{document_id}/status", response_model=IngestionStatus)
 async def get_ingestion_status(document_id: str):
     """Get the ingestion status for a document."""
-    if document_id not in _ingestion_tasks:
+    task = get_state_store().get_task_status(document_id)
+    if not task:
         raise HTTPException(status_code=404, detail="Document not found.")
-    return _ingestion_tasks[document_id]
+    return task
 
 
 @app.delete("/ingest/documents/{document_id}")
 async def delete_document(document_id: str):
     """Delete a document and its embeddings from the vector store."""
-    if document_id not in _documents:
+    store = get_state_store()
+    doc_info = store.delete_document(document_id)
+    if not doc_info:
         raise HTTPException(status_code=404, detail="Document not found.")
 
     # Remove from Qdrant
     try:
         client = _get_qdrant_client()
         settings = get_settings()
-        
+
         client.delete(
             collection_name=settings.qdrant_collection,
             points_selector=Filter(
@@ -727,18 +695,10 @@ async def delete_document(document_id: str):
         logger.error("Failed to delete from SQLite: %s", str(e))
 
     # Remove uploaded file
-    doc_info = _documents[document_id]
     ext = f".{doc_info.file_type.value}"
     file_path = UPLOAD_DIR / f"{document_id}{ext}"
     if file_path.exists():
         file_path.unlink()
-
-    # Remove metadata
-    for h, d in list(_hash_index.items()):
-        if d == document_id:
-            del _hash_index[h]
-    _documents.pop(document_id, None)
-    _ingestion_tasks.pop(document_id, None)
 
     return JSONResponse(content={"message": "Document deleted successfully."})
 
@@ -746,7 +706,7 @@ _cleanup_lock = asyncio.Lock()
 
 
 def _is_processing(doc_id: str) -> bool:
-    task = _ingestion_tasks.get(doc_id)
+    task = get_state_store().get_task_status(doc_id)
     return task is not None and task.status in (
         IngestionStatusEnum.PENDING,
         IngestionStatusEnum.PROCESSING,
@@ -783,20 +743,21 @@ async def cleanup_orphans(
             max_delete=max_delete,
         )
 
-    # Đồng bộ lại trạng thái trong RAM.
+    # Đồng bộ lại trạng thái trong PostgreSQL.
+    store = get_state_store()
     for doc_id in report.deleted_ids:
-        _documents.pop(doc_id, None)
-        _ingestion_tasks.pop(doc_id, None)
-        for content_hash, mapped_id in list(_hash_index.items()):
-            if mapped_id == doc_id:
-                del _hash_index[content_hash]
+        store.delete_document(doc_id)
 
     return asdict(report)
 
 @app.get("/ingest/health", response_model=ServiceHealth)
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint checking Qdrant and PostgreSQL."""
+    from sqlalchemy import text
+
     qdrant_ok = False
+    db_ok = False
+
     try:
         client = _get_qdrant_client()
         client.get_collections()
@@ -804,11 +765,21 @@ async def health_check():
     except Exception:
         pass
 
+    try:
+        with get_state_store().engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        pass
+
+    all_ok = qdrant_ok and db_ok
+    details = f"Qdrant: {'connected' if qdrant_ok else 'unavailable'} | DB: {'connected' if db_ok else 'unavailable'}"
+
     return ServiceHealth(
         service="ingestion",
-        status="healthy" if qdrant_ok else "degraded",
+        status="healthy" if all_ok else "degraded",
         version="0.1.0",
-        details=f"Qdrant: {'connected' if qdrant_ok else 'unavailable'}",
+        details=details,
     )
 
 
