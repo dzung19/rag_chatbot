@@ -2,24 +2,38 @@
 
 Features:
 - Uses openpyxl streaming mode (read_only=True, data_only=True) for minimal memory usage.
-- Trims trailing empty rows and columns (prevents empty '| | |' explosions).
-- Detects multiple tables per sheet separated by blank rows.
+- Resets bogus sheet dimensions and stops after a long streak of empty rows
+  (protects against sheets formatted down to row 1,048,576).
+- Detects multiple tables per sheet separated by >= `table_gap_rows` blank rows.
+  Tiny blocks (notes, totals, signatures) are attached to the neighbouring table.
 - Automatically identifies header rows and handles table titles.
+- Drops fully-empty columns and duplicate rows; constant columns are hoisted into
+  the chunk context instead of being repeated on every row.
+- Dense tables -> compact Markdown tables; sparse tables -> key-value lines with
+  only non-empty cells.
+- Tiered indexing policy:
+    * sheet with <= `full_index_rows` data rows -> row-window chunks (full index)
+    * larger sheets -> summary + per-column statistics only ("tạm thời chỉ index summary")
+    * per-file chunk budget (`max_chunks_per_file`): largest tables are demoted to
+      summary-only until the file fits the budget.
 - Handles hidden sheets based on policy (indexes if hidden_sheets < 2).
-- Large sheet protection: if sheet > max_rows_per_sheet (default 20,000), indexes summary only.
-- Row-window chunking: produces compact Markdown tables with repeated headers, never cuts rows in half.
-- Produces a summary chunk per sheet/table for high-level retrieval.
 - Generates clean full-document markdown text for SQLite (Business Compare flow).
+  Full text always contains every row, regardless of the vector indexing policy.
 """
 
 from __future__ import annotations
 
 import datetime
 import logging
-from pathlib import Path
-from typing import Any, Generator, Optional
+import re
+from collections import Counter
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+_NUM_RE = re.compile(r"^-?\d+(\.\d+)?$")
 
 
 def _format_cell(val: Any) -> str:
@@ -30,13 +44,13 @@ def _format_cell(val: Any) -> str:
         if isinstance(val, datetime.datetime) and (val.hour or val.minute or val.second):
             return val.strftime("%Y-%m-%d %H:%M")
         return val.strftime("%Y-%m-%d")
+    if isinstance(val, bool):
+        return "Có" if val else "Không"
     if isinstance(val, float):
         if val.is_integer():
             return str(int(val))
         # Round long floating decimals to 4 places, strip trailing zeros
         return f"{val:.4f}".rstrip("0").rstrip(".")
-    if isinstance(val, bool):
-        return "Có" if val else "Không"
     # String or other types
     s = str(val).strip()
     # Normalize whitespaces and newlines inside cells
@@ -51,17 +65,46 @@ def _is_row_empty(row: list[str]) -> bool:
     return not any(cell for cell in row)
 
 
+def _md_header(headers: list[str]) -> str:
+    header_line = "| " + " | ".join(headers) + " |"
+    sep_line = "|" + "---|" * len(headers)
+    return header_line + "\n" + sep_line
+
+
+def _md_row(row: list[str]) -> str:
+    return "| " + " | ".join(row) + " |"
+
+
+def _kv_row(headers: list[str], row: list[str]) -> str:
+    parts = [f"{h}: {v}" for h, v in zip(headers, row) if v]
+    return "- " + "; ".join(parts)
+
+
 def _build_markdown_table(headers: list[str], rows: list[list[str]]) -> str:
     """Build a clean Markdown table from headers and row cells."""
     if not headers and not rows:
         return ""
     if not headers and rows:
         headers = [f"Cột {i + 1}" for i in range(len(rows[0]))]
+    return "\n".join([_md_header(headers)] + [_md_row(r) for r in rows])
 
-    header_line = "| " + " | ".join(headers) + " |"
-    sep_line = "| " + " | ".join(["---"] * len(headers)) + " |"
-    data_lines = ["| " + " | ".join(row) + " |" for row in rows]
-    return "\n".join([header_line, sep_line] + data_lines)
+
+@dataclass
+class ExcelTable:
+    """A detected table inside a sheet, after cleaning."""
+
+    sheet_name: str
+    sheet_idx: int
+    table_idx: int
+    title: str
+    headers: list[str]
+    rows: list[list[str]]
+    row_numbers: list[int]  # original Excel row numbers, aligned with `rows`
+    constants: dict[str, str] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+    sparse: bool = False
+    summary_only: bool = False
+    data_chunks: list[dict] = field(default_factory=list)
 
 
 class ExcelParser:
@@ -69,13 +112,28 @@ class ExcelParser:
 
     def __init__(
         self,
-        chunk_chars: int = 1500,
-        max_rows_per_sheet: int = 20000,
+        chunk_chars: int = 4000,
+        max_rows_per_sheet: int = 200000,
         max_cols: int = 50,
+        full_index_rows: int = 2000,
+        max_chunks_per_file: int = 500,
+        table_gap_rows: int = 2,
+        sparse_threshold: float = 0.4,
+        max_empty_streak: int = 1000,
     ):
         self.chunk_chars = chunk_chars
+        # Hard scan cap per sheet (rows beyond this are not read at all)
         self.max_rows_per_sheet = max_rows_per_sheet
         self.max_cols = max_cols
+        self.full_index_rows = full_index_rows
+        self.max_chunks_per_file = max_chunks_per_file
+        self.table_gap_rows = max(1, table_gap_rows)
+        self.sparse_threshold = sparse_threshold
+        self.max_empty_streak = max_empty_streak
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def parse_and_chunk(
         self,
@@ -95,16 +153,66 @@ class ExcelParser:
             - text_pages: list of cleaned markdown text per sheet (for SQLite full_documents).
             - chunks: list of chunk dicts ready for embeddings and vector storage.
         """
+        sheets = self._read_workbook(file_path, source_filename)
+
+        # Phase 1: decide indexing policy per sheet (full vs summary-only)
+        for sheet_name, sheet_idx, tables in sheets:
+            total_rows = sum(len(t.rows) for t in tables)
+            if total_rows > self.full_index_rows:
+                logger.info(
+                    "Sheet '%s' in %s has %d data rows > %d. Indexing summary only.",
+                    sheet_name, source_filename, total_rows, self.full_index_rows,
+                )
+                for t in tables:
+                    t.summary_only = True
+
+        # Phase 2: build data chunks for fully indexed tables
+        all_tables = [t for _, _, tables in sheets for t in tables]
+        for t in all_tables:
+            if not t.summary_only:
+                t.data_chunks = self._chunk_table_rows(t, source_filename)
+
+        # Phase 3: enforce per-file chunk budget by demoting the largest tables
+        self._enforce_chunk_budget(sheets, source_filename)
+
+        # Phase 4: emit chunks in document order + full text pages
+        chunks: list[dict] = []
+        text_pages: list[str] = []
+        for sheet_name, sheet_idx, tables in sheets:
+            if not tables:
+                continue
+            chunks.append(self._create_sheet_summary_chunk(sheet_name, sheet_idx, tables, source_filename))
+            for t in tables:
+                if t.summary_only:
+                    chunks.append(self._create_table_stats_chunk(t, source_filename))
+                else:
+                    chunks.extend(t.data_chunks)
+            text_pages.append(self._sheet_full_text(sheet_name, tables))
+
+        for i, c in enumerate(chunks):
+            c["chunk_index"] = start_chunk_index + i
+
+        logger.info(
+            "Excel '%s' parsed into %d sheet pages and %d structure-aware chunks "
+            "(%d tables, %d summary-only)",
+            source_filename,
+            len(text_pages),
+            len(chunks),
+            len(all_tables),
+            sum(1 for t in all_tables if t.summary_only),
+        )
+        return text_pages, chunks
+
+    # ------------------------------------------------------------------
+    # Reading & table detection
+    # ------------------------------------------------------------------
+
+    def _read_workbook(self, file_path: str, source_filename: str) -> list[tuple[str, int, list[ExcelTable]]]:
         from openpyxl import load_workbook
 
-        text_pages: list[str] = []
-        chunks: list[dict] = []
-        current_chunk_idx = start_chunk_index
-
+        sheets: list[tuple[str, int, list[ExcelTable]]] = []
         wb = load_workbook(file_path, read_only=True, data_only=True)
-
         try:
-            # 1. Determine sheet visibility policy
             # Policy: index hidden sheets only if total hidden sheets < 2
             hidden_sheets_count = sum(
                 1 for name in wb.sheetnames if getattr(wb[name], "sheet_state", "visible") != "visible"
@@ -113,378 +221,496 @@ class ExcelParser:
 
             for sheet_idx, sheet_name in enumerate(wb.sheetnames, start=1):
                 ws = wb[sheet_name]
-                sheet_state = getattr(ws, "sheet_state", "visible")
-                if sheet_state != "visible" and not allow_hidden:
+                if getattr(ws, "sheet_state", "visible") != "visible" and not allow_hidden:
                     logger.info(
                         "Skipping hidden sheet '%s' in %s (total hidden sheets: %d >= 2)",
-                        sheet_name,
-                        source_filename,
-                        hidden_sheets_count,
+                        sheet_name, source_filename, hidden_sheets_count,
                     )
                     continue
-
-                # 2. Extract and sanitize raw rows
-                raw_rows: list[list[str]] = []
-                for row_tuple in ws.iter_rows(values_only=True):
-                    row_strs = [_format_cell(c) for c in row_tuple]
-                    raw_rows.append(row_strs)
-
-                if not raw_rows:
-                    continue
-
-                # 3. Detect maximum non-empty column index to strip trailing empty columns
-                max_active_col = 0
-                for r in raw_rows:
-                    for c_idx in range(len(r) - 1, -1, -1):
-                        if r[c_idx]:
-                            if c_idx + 1 > max_active_col:
-                                max_active_col = c_idx + 1
-                            break
-
-                if max_active_col == 0:
-                    continue  # Entire sheet is empty
-
-                # Cap max columns to prevent runaway horizontal width
-                active_col_count = min(max_active_col, self.max_cols)
-
-                # Trim rows
-                trimmed_rows: list[list[str]] = []
-                for r in raw_rows:
-                    trimmed = r[:active_col_count]
-                    if len(trimmed) < active_col_count:
-                        trimmed.extend([""] * (active_col_count - len(trimmed)))
-                    trimmed_rows.append(trimmed)
-
-                # 4. Partition rows into tables separated by empty rows
-                tables = self._extract_tables_from_rows(trimmed_rows)
-                if not tables:
-                    continue
-
-                sheet_markdown_parts: list[str] = [f"## Sheet: {sheet_name}"]
-
-                # 5. Process each table in the sheet
-                for table_idx, table_data in enumerate(tables, start=1):
-                    table_title = table_data["title"] or f"Bảng {table_idx}"
-                    headers = table_data["headers"]
-                    data_rows = table_data["data_rows"]
-                    total_table_rows = len(data_rows)
-
-                    sheet_markdown_parts.append(f"\n### {table_title}")
-                    sheet_markdown_parts.append(_build_markdown_table(headers, data_rows))
-
-                    # Check for oversized sheet/table limit (e.g. > 20,000 rows)
-                    # Policy: "tạm thời chỉ index summary"
-                    if total_table_rows > self.max_rows_per_sheet:
-                        logger.warning(
-                            "Sheet '%s' table '%s' has %d rows exceeding limit %d. Indexing summary only.",
-                            sheet_name,
-                            table_title,
-                            total_table_rows,
-                            self.max_rows_per_sheet,
-                        )
-                        summary_chunk = self._create_summary_chunk(
-                            sheet_name=sheet_name,
-                            sheet_idx=sheet_idx,
-                            table_title=table_title,
-                            headers=headers,
-                            total_rows=total_table_rows,
-                            sample_rows=data_rows[:20],
-                            source_filename=source_filename,
-                            chunk_index=current_chunk_idx,
-                            is_oversized=True,
-                        )
-                        chunks.append(summary_chunk)
-                        current_chunk_idx += 1
-                        continue
-
-                    # Standard table: Always emit 1 Summary Chunk for high-level retrieval
-                    summary_chunk = self._create_summary_chunk(
-                        sheet_name=sheet_name,
-                        sheet_idx=sheet_idx,
-                        table_title=table_title,
-                        headers=headers,
-                        total_rows=total_table_rows,
-                        sample_rows=data_rows[:5],
-                        source_filename=source_filename,
-                        chunk_index=current_chunk_idx,
-                        is_oversized=False,
-                    )
-                    chunks.append(summary_chunk)
-                    current_chunk_idx += 1
-
-                    # Row-window chunking into Markdown tables
-                    table_chunks = self._chunk_table_rows(
-                        sheet_name=sheet_name,
-                        sheet_idx=sheet_idx,
-                        table_title=table_title,
-                        headers=headers,
-                        data_rows=data_rows,
-                        source_filename=source_filename,
-                        start_chunk_index=current_chunk_idx,
-                    )
-                    chunks.extend(table_chunks)
-                    current_chunk_idx += len(table_chunks)
-
-                text_pages.append("\n\n".join(sheet_markdown_parts))
-
+                tables = self._read_sheet_tables(ws, sheet_name, sheet_idx)
+                if tables:
+                    sheets.append((sheet_name, sheet_idx, tables))
         finally:
             wb.close()
+        return sheets
 
-        logger.info(
-            "Excel '%s' parsed into %d sheet pages and %d structure-aware chunks",
-            source_filename,
-            len(text_pages),
-            len(chunks),
-        )
-        return text_pages, chunks
+    def _read_sheet_tables(self, ws: Any, sheet_name: str, sheet_idx: int) -> list[ExcelTable]:
+        """Stream rows of a sheet and split them into tables."""
+        # Stored dimensions are frequently wrong (e.g. formatted to XFD1048576)
+        if hasattr(ws, "reset_dimensions"):
+            try:
+                ws.reset_dimensions()
+            except Exception:  # pragma: no cover - defensive
+                pass
 
-    def _extract_tables_from_rows(self, rows: list[list[str]]) -> list[dict]:
-        """Split a list of sheet rows into distinct tables separated by blank rows."""
-        tables: list[dict] = []
-        current_block: list[list[str]] = []
+        blocks: list[list[tuple[int, list[str]]]] = []
+        current: list[tuple[int, list[str]]] = []
+        empty_streak = 0
 
-        for row in rows:
-            if _is_row_empty(row):
-                if current_block:
-                    table = self._process_table_block(current_block)
-                    if table:
-                        tables.append(table)
-                    current_block = []
-            else:
-                current_block.append(row)
+        for row_num, row_tuple in enumerate(ws.iter_rows(values_only=True), start=1):
+            if row_num > self.max_rows_per_sheet:
+                logger.warning("Sheet '%s' truncated at %d rows (scan cap)", sheet_name, self.max_rows_per_sheet)
+                break
+            cells = [_format_cell(c) for c in row_tuple[: self.max_cols]]
+            # Strip trailing empty cells per row
+            while cells and not cells[-1]:
+                cells.pop()
 
-        if current_block:
-            table = self._process_table_block(current_block)
+            if not cells:
+                empty_streak += 1
+                if empty_streak >= self.table_gap_rows and current:
+                    blocks.append(current)
+                    current = []
+                if empty_streak >= self.max_empty_streak:
+                    break
+                continue
+
+            empty_streak = 0
+            current.append((row_num, cells))
+
+        if current:
+            blocks.append(current)
+
+        tables: list[ExcelTable] = []
+        pending_notes: list[str] = []
+        for block in blocks:
+            if self._is_note_block(block):
+                note_lines = [" ".join(c for c in cells if c) for _, cells in block]
+                if tables:
+                    tables[-1].notes.extend(note_lines)
+                else:
+                    pending_notes.extend(note_lines)
+                continue
+            table = self._process_table_block(block, sheet_name, sheet_idx, len(tables) + 1)
             if table:
+                if pending_notes:
+                    table.notes = pending_notes + table.notes
+                    pending_notes = []
                 tables.append(table)
 
+        if pending_notes and not tables:
+            # Sheet with only short text lines: keep them as a single-column table
+            tables.append(
+                ExcelTable(
+                    sheet_name=sheet_name,
+                    sheet_idx=sheet_idx,
+                    table_idx=1,
+                    title="Ghi chú",
+                    headers=["Nội dung"],
+                    rows=[[n] for n in pending_notes],
+                    row_numbers=list(range(1, len(pending_notes) + 1)),
+                    sparse=True,
+                )
+            )
         return tables
 
-    def _process_table_block(self, block: list[list[str]]) -> Optional[dict]:
+    @staticmethod
+    def _is_note_block(block: list[tuple[int, list[str]]]) -> bool:
+        """Tiny blocks (<= 2 rows, <= 2 filled cells each) are notes, totals, signatures."""
+        if len(block) > 2:
+            return False
+        return all(sum(1 for c in cells if c) <= 2 for _, cells in block)
+
+    def _process_table_block(
+        self,
+        block: list[tuple[int, list[str]]],
+        sheet_name: str,
+        sheet_idx: int,
+        table_idx: int,
+    ) -> Optional[ExcelTable]:
         """Analyze a contiguous block of rows to extract title, header, and data rows."""
         if not block:
             return None
 
         title: Optional[str] = None
-        start_idx = 0
+        start = 0
 
-        # Check if first row is a title banner (e.g. only 1 or 2 cells filled among many columns)
-        first_row_non_empty = [c for c in block[0] if c]
-        if len(first_row_non_empty) == 1 and len(block) > 1:
-            title = first_row_non_empty[0]
-            start_idx = 1
+        # Title banner: first row has a single filled cell
+        first_non_empty = [c for c in block[0][1] if c]
+        if len(first_non_empty) == 1 and len(block) > 1:
+            title = first_non_empty[0]
+            start = 1
 
-        if start_idx >= len(block):
+        body = block[start:]
+        if not body:
             return None
 
+        width = max(len(cells) for _, cells in body)
+        padded = [(rn, cells + [""] * (width - len(cells))) for rn, cells in body]
+
         # Detect header row
-        candidate_header = block[start_idx]
-        # Fill-forward horizontally for blank header cells (common in merged cell reports)
         # NOTE / TODO: Detailed merged cells layout detection requires read_only=False.
         # In streaming read_only mode, we forward-fill adjacent empty header cells.
-        filled_header: list[str] = []
-        last_val = ""
-        for i, h in enumerate(candidate_header):
-            val = h if h else last_val
-            if not val:
-                val = f"Cột {i + 1}"
-            filled_header.append(val)
-            last_val = val
-
-        data_rows = block[start_idx + 1 :]
-        if not data_rows:
-            # Table has only 1 row, treat it as data
-            headers = [f"Cột {i + 1}" for i in range(len(candidate_header))]
-            data_rows = [candidate_header]
+        candidate_header = padded[0][1]
+        data = padded[1:]
+        if not data:
+            headers = [f"Cột {i + 1}" for i in range(width)]
+            data = padded
         else:
-            headers = filled_header
+            headers = []
+            last_val = ""
+            for i, h in enumerate(candidate_header):
+                val = h or last_val or f"Cột {i + 1}"
+                headers.append(val)
+                last_val = val
+            headers = self._dedupe_headers(headers)
 
-        return {
-            "title": title,
-            "headers": headers,
-            "data_rows": data_rows,
-        }
+        # Remove exact duplicate rows (keep first occurrence)
+        seen: set[tuple[str, ...]] = set()
+        rows: list[list[str]] = []
+        row_numbers: list[int] = []
+        for rn, cells in data:
+            key = tuple(cells)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(cells)
+            row_numbers.append(rn)
 
-    def _create_summary_chunk(
-        self,
-        sheet_name: str,
-        sheet_idx: int,
-        table_title: str,
-        headers: list[str],
-        total_rows: int,
-        sample_rows: list[list[str]],
-        source_filename: str,
-        chunk_index: int,
-        is_oversized: bool = False,
-    ) -> dict:
-        """Create a high-level summary chunk for the sheet/table."""
-        header_parts = []
-        if source_filename:
-            header_parts.append(f"Nguồn: {source_filename}")
-        header_parts.append(f"Sheet: {sheet_name}")
-        header_parts.append(f"Tóm tắt: {table_title}")
-        context_header = f"[{' | '.join(header_parts)}]\n"
+        # Drop columns empty in every data row; hoist constant columns
+        keep: list[int] = []
+        constants: dict[str, str] = {}
+        for ci in range(width):
+            col_vals = [r[ci] for r in rows]
+            non_empty = [v for v in col_vals if v]
+            if not non_empty:
+                continue
+            if len(rows) >= 3 and len(non_empty) == len(rows) and len(set(non_empty)) == 1:
+                constants[headers[ci]] = non_empty[0]
+                continue
+            keep.append(ci)
 
-        lines = [
-            f"Bảng: {table_title}",
-            f"Tổng số dòng: {total_rows} dòng",
-            f"Tổng số cột: {len(headers)} cột",
-            f"Danh sách các cột: {', '.join(headers)}",
-        ]
+        if not keep and not constants:
+            return None
+        if not keep:
+            # Every column is constant: keep them as data so the table is not lost
+            keep = [ci for ci in range(width) if headers[ci] in constants]
+            constants = {}
 
-        if is_oversized:
-            lines.append(
-                f"(Lưu ý: Bảng này có kích thước lớn với {total_rows} dòng. "
-                "Hệ thống tóm tắt cấu trúc và các dòng mẫu dưới đây để tra cứu nhanh)."
+        headers = [headers[ci] for ci in keep]
+        rows = [[r[ci] for ci in keep] for r in rows]
+
+        total_cells = len(rows) * len(headers)
+        filled = sum(1 for r in rows for v in r if v)
+        sparse = total_cells > 0 and (filled / total_cells) < self.sparse_threshold
+
+        return ExcelTable(
+            sheet_name=sheet_name,
+            sheet_idx=sheet_idx,
+            table_idx=table_idx,
+            title=title or f"Bảng {table_idx}",
+            headers=headers,
+            rows=rows,
+            row_numbers=row_numbers,
+            constants=constants,
+            sparse=sparse,
+        )
+
+    @staticmethod
+    def _dedupe_headers(headers: list[str]) -> list[str]:
+        counts: Counter[str] = Counter()
+        result: list[str] = []
+        for h in headers:
+            counts[h] += 1
+            result.append(h if counts[h] == 1 else f"{h} ({counts[h]})")
+        return result
+
+    # ------------------------------------------------------------------
+    # Budget
+    # ------------------------------------------------------------------
+
+    def _enforce_chunk_budget(self, sheets: list[tuple[str, int, list[ExcelTable]]], source_filename: str) -> None:
+        def total_chunks() -> int:
+            n = 0
+            for _, _, tables in sheets:
+                n += 1  # sheet summary
+                for t in tables:
+                    n += 1 if t.summary_only else len(t.data_chunks)
+            return n
+
+        total = total_chunks()
+        if total <= self.max_chunks_per_file:
+            return
+
+        candidates = sorted(
+            (t for _, _, tables in sheets for t in tables if not t.summary_only),
+            key=lambda t: len(t.data_chunks),
+            reverse=True,
+        )
+        for t in candidates:
+            if total <= self.max_chunks_per_file:
+                break
+            if len(t.data_chunks) <= 1:
+                break  # demoting would not reduce the count
+            total -= len(t.data_chunks) - 1
+            t.summary_only = True
+            t.data_chunks = []
+            logger.info(
+                "Chunk budget %d exceeded for %s: demoted '%s / %s' (%d rows) to summary-only",
+                self.max_chunks_per_file, source_filename, t.sheet_name, t.title, len(t.rows),
             )
 
-        if sample_rows:
-            lines.append("\nDữ liệu mẫu:")
-            lines.append(_build_markdown_table(headers, sample_rows))
+        if total > self.max_chunks_per_file:
+            logger.warning(
+                "Excel %s still has %d chunks after demotion (budget %d)",
+                source_filename, total, self.max_chunks_per_file,
+            )
 
-        body = "\n".join(lines)
-        full_text = (context_header + body).strip()
+    # ------------------------------------------------------------------
+    # Chunk builders
+    # ------------------------------------------------------------------
 
-        return {
-            "text": full_text,
-            "raw_text": body,
-            "chunk_index": chunk_index,
-            "page": sheet_idx,
-            "heading": f"{sheet_name} - {table_title} (Tóm tắt)",
-            "source": source_filename,
-            "context_header": context_header.strip(),
-            "metadata": {
-                "sheet": sheet_name,
-                "table": table_title,
-                "is_summary": True,
-                "total_rows": total_rows,
-                "columns": headers,
-            },
-        }
+    @staticmethod
+    def _context_header(source_filename: str, *parts: str) -> str:
+        items = [p for p in ([source_filename] if source_filename else []) + list(parts) if p]
+        return "[" + " › ".join(items) + "]"
 
-    def _chunk_table_rows(
-        self,
-        sheet_name: str,
-        sheet_idx: int,
-        table_title: str,
-        headers: list[str],
-        data_rows: list[list[str]],
-        source_filename: str,
-        start_chunk_index: int,
-    ) -> list[dict]:
-        """Group data rows into Markdown table chunks within character limit."""
+    @staticmethod
+    def _constants_line(constants: dict[str, str]) -> str:
+        if not constants:
+            return ""
+        return "Giá trị chung: " + "; ".join(f"{k}: {v}" for k, v in constants.items())
+
+    def _chunk_table_rows(self, t: ExcelTable, source_filename: str) -> list[dict]:
+        """Group data rows into chunks within the character budget (never splits a row)."""
         chunks: list[dict] = []
-        chunk_idx = start_chunk_index
+        constants_line = self._constants_line(t.constants)
+        md_head = "" if t.sparse else _md_header(t.headers)
 
-        header_line = "| " + " | ".join(headers) + " |"
-        sep_line = "| " + " | ".join(["---"] * len(headers)) + " |"
-        table_boilerplate_len = len(header_line) + len(sep_line) + 2
+        # Fixed overhead: context header (~ estimate with widest row label) + constants + table header
+        base_overhead = (
+            len(self._context_header(source_filename, t.sheet_name, t.title, "dòng 1000000–1000000"))
+            + (len(constants_line) + 1 if constants_line else 0)
+            + (len(md_head) + 1 if md_head else 0)
+            + 1
+        )
+        budget = max(self.chunk_chars - base_overhead, 200)
 
-        current_rows: list[list[str]] = []
-        current_len = table_boilerplate_len
-        current_start_row = 1
+        cur_lines: list[str] = []
+        cur_start: Optional[int] = None
+        cur_end: Optional[int] = None
+        cur_len = 0
 
-        for row_num, row_cells in enumerate(data_rows, start=1):
-            row_str = "| " + " | ".join(row_cells) + " |"
-            row_len = len(row_str) + 1
+        def flush() -> None:
+            nonlocal cur_lines, cur_start, cur_end, cur_len
+            if cur_lines:
+                chunks.append(self._build_data_chunk(t, cur_lines, cur_start, cur_end, source_filename))
+            cur_lines, cur_start, cur_end, cur_len = [], None, None, 0
 
-            # If adding this row exceeds chunk size budget (and we already have at least 1 row)
-            if current_rows and (current_len + row_len > self.chunk_chars):
-                end_row = row_num - 1
-                chunk = self._build_data_chunk(
-                    sheet_name=sheet_name,
-                    sheet_idx=sheet_idx,
-                    table_title=table_title,
-                    headers=headers,
-                    rows=current_rows,
-                    start_row=current_start_row,
-                    end_row=end_row,
-                    source_filename=source_filename,
-                    chunk_index=chunk_idx,
-                )
-                chunks.append(chunk)
-                chunk_idx += 1
+        for row, rn in zip(t.rows, t.row_numbers):
+            line = _kv_row(t.headers, row) if t.sparse else _md_row(row)
+            line_len = len(line) + 1
 
-                current_rows = [row_cells]
-                current_len = table_boilerplate_len + row_len
-                current_start_row = row_num
-            else:
-                current_rows.append(row_cells)
-                current_len += row_len
+            if line_len > budget:
+                # Oversized single row: flush, then split the row as key-value pieces
+                flush()
+                kv = _kv_row(t.headers, row)
+                for i in range(0, len(kv), budget):
+                    chunks.append(self._build_data_chunk(t, [kv[i : i + budget]], rn, rn, source_filename, force_kv=True))
+                continue
 
-        # Flush remaining rows
-        if current_rows:
-            end_row = len(data_rows)
-            chunk = self._build_data_chunk(
-                sheet_name=sheet_name,
-                sheet_idx=sheet_idx,
-                table_title=table_title,
-                headers=headers,
-                rows=current_rows,
-                start_row=current_start_row,
-                end_row=end_row,
-                source_filename=source_filename,
-                chunk_index=chunk_idx,
-            )
-            chunks.append(chunk)
+            if cur_lines and cur_len + line_len > budget:
+                flush()
+            if cur_start is None:
+                cur_start = rn
+            cur_end = rn
+            cur_lines.append(line)
+            cur_len += line_len
 
+        flush()
         return chunks
 
     def _build_data_chunk(
         self,
-        sheet_name: str,
-        sheet_idx: int,
-        table_title: str,
-        headers: list[str],
-        rows: list[list[str]],
-        start_row: int,
-        end_row: int,
+        t: ExcelTable,
+        lines: list[str],
+        start_row: Optional[int],
+        end_row: Optional[int],
         source_filename: str,
-        chunk_index: int,
+        force_kv: bool = False,
     ) -> dict:
-        """Construct a single Markdown table data chunk."""
-        header_parts = []
-        if source_filename:
-            header_parts.append(f"Nguồn: {source_filename}")
-        header_parts.append(f"Sheet: {sheet_name}")
-        header_parts.append(f"Bảng: {table_title}")
-        header_parts.append(f"Dòng {start_row}–{end_row}")
-        context_header = f"[{' | '.join(header_parts)}]\n"
+        row_label = f"dòng {start_row}–{end_row}" if start_row != end_row else f"dòng {start_row}"
+        context_header = self._context_header(source_filename, t.sheet_name, t.title, row_label)
 
-        md_table = _build_markdown_table(headers, rows)
-        full_text = (context_header + md_table).strip()
+        body_parts: list[str] = []
+        constants_line = self._constants_line(t.constants)
+        if constants_line:
+            body_parts.append(constants_line)
+        if t.sparse or force_kv:
+            body_parts.extend(lines)
+        else:
+            body_parts.append(_md_header(t.headers))
+            body_parts.extend(lines)
+        body = "\n".join(body_parts)
 
         return {
-            "text": full_text,
-            "raw_text": md_table,
-            "chunk_index": chunk_index,
-            "page": sheet_idx,
-            "heading": f"{sheet_name} - {table_title} (Dòng {start_row}–{end_row})",
+            "text": f"{context_header}\n{body}".strip(),
+            "raw_text": body,
+            "chunk_index": 0,  # assigned at emit time
+            "page": t.sheet_idx,
+            "heading": f"{t.sheet_name} - {t.title} ({row_label})",
             "source": source_filename,
-            "context_header": context_header.strip(),
+            "context_header": context_header,
             "metadata": {
-                "sheet": sheet_name,
-                "table": table_title,
+                "sheet": t.sheet_name,
+                "table": t.title,
                 "row_start": start_row,
                 "row_end": end_row,
-                "columns": headers,
+                "columns": t.headers,
             },
         }
+
+    def _create_sheet_summary_chunk(
+        self,
+        sheet_name: str,
+        sheet_idx: int,
+        tables: list[ExcelTable],
+        source_filename: str,
+    ) -> dict:
+        """One overview chunk per sheet listing all its tables."""
+        context_header = self._context_header(source_filename, sheet_name, "Tóm tắt sheet")
+        total_rows = sum(len(t.rows) for t in tables)
+        lines = [
+            f"Sheet: {sheet_name}",
+            f"Số bảng: {len(tables)} | Tổng số dòng dữ liệu: {total_rows}",
+        ]
+        for t in tables:
+            mode = "chỉ tóm tắt" if t.summary_only else "đầy đủ"
+            lines.append(f"- {t.title}: {len(t.rows)} dòng, {len(t.headers)} cột ({mode})")
+            lines.append(f"  Cột: {', '.join(t.headers)}")
+            constants_line = self._constants_line(t.constants)
+            if constants_line:
+                lines.append(f"  {constants_line}")
+            for note in t.notes[:5]:
+                lines.append(f"  Ghi chú: {note}")
+
+        body = self._truncate("\n".join(lines))
+        return {
+            "text": f"{context_header}\n{body}".strip(),
+            "raw_text": body,
+            "chunk_index": 0,
+            "page": sheet_idx,
+            "heading": f"{sheet_name} (Tóm tắt)",
+            "source": source_filename,
+            "context_header": context_header,
+            "metadata": {
+                "sheet": sheet_name,
+                "is_summary": True,
+                "total_rows": total_rows,
+                "tables": [t.title for t in tables],
+            },
+        }
+
+    def _create_table_stats_chunk(self, t: ExcelTable, source_filename: str) -> dict:
+        """Summary + per-column statistics for a table that is not fully indexed."""
+        context_header = self._context_header(source_filename, t.sheet_name, t.title, "Thống kê")
+        lines = [
+            f"Bảng: {t.title}",
+            f"Tổng số dòng: {len(t.rows)} | Tổng số cột: {len(t.headers)}",
+            "(Bảng lớn: chỉ lưu cấu trúc và thống kê các cột để tra cứu nhanh.)",
+        ]
+        constants_line = self._constants_line(t.constants)
+        if constants_line:
+            lines.append(constants_line)
+        lines.append("Thống kê các cột:")
+        for ci, h in enumerate(t.headers):
+            lines.append(f"- {h}: {self._column_stats([r[ci] for r in t.rows])}")
+
+        sample = t.rows[:3]
+        if sample:
+            lines.append("Dữ liệu mẫu:")
+            if t.sparse:
+                lines.extend(_kv_row(t.headers, r) for r in sample)
+            else:
+                lines.append(_build_markdown_table(t.headers, sample))
+
+        body = self._truncate("\n".join(lines))
+        return {
+            "text": f"{context_header}\n{body}".strip(),
+            "raw_text": body,
+            "chunk_index": 0,
+            "page": t.sheet_idx,
+            "heading": f"{t.sheet_name} - {t.title} (Tóm tắt)",
+            "source": source_filename,
+            "context_header": context_header,
+            "metadata": {
+                "sheet": t.sheet_name,
+                "table": t.title,
+                "is_summary": True,
+                "total_rows": len(t.rows),
+                "columns": t.headers,
+            },
+        }
+
+    @staticmethod
+    def _column_stats(values: list[str]) -> str:
+        non_empty = [v for v in values if v]
+        if not non_empty:
+            return "trống"
+        n = len(non_empty)
+
+        nums = [float(v) for v in non_empty if _NUM_RE.match(v)]
+        if len(nums) >= 0.8 * n:
+            total = sum(nums)
+            fmt = lambda x: _format_cell(float(x))  # noqa: E731
+            return (
+                f"số; min {fmt(min(nums))}, max {fmt(max(nums))}, "
+                f"tổng {fmt(total)}, trung bình {fmt(total / len(nums))}"
+            )
+
+        dates = sorted(v[:10] for v in non_empty if _DATE_RE.match(v))
+        if len(dates) >= 0.8 * n:
+            return f"ngày; từ {dates[0]} đến {dates[-1]}"
+
+        counter = Counter(non_empty)
+        top = [v if len(v) <= 40 else v[:37] + "..." for v, _ in counter.most_common(10)]
+        return f"{len(counter)} giá trị khác nhau; phổ biến: {', '.join(top)}"
+
+    def _truncate(self, text: str) -> str:
+        limit = self.chunk_chars
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip() + "..."
+
+    # ------------------------------------------------------------------
+    # Full text (SQLite)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sheet_full_text(sheet_name: str, tables: list[ExcelTable]) -> str:
+        parts = [f"## Sheet: {sheet_name}"]
+        for t in tables:
+            parts.append(f"\n### {t.title}")
+            constants_line = ExcelParser._constants_line(t.constants)
+            if constants_line:
+                parts.append(constants_line)
+            parts.append(_build_markdown_table(t.headers, t.rows))
+            for note in t.notes:
+                parts.append(f"Ghi chú: {note}")
+        return "\n\n".join(parts)
 
 
 def parse_and_chunk_excel(
     file_path: str,
     source_filename: str = "",
-    chunk_chars: int = 1500,
-    max_rows_per_sheet: int = 20000,
+    chunk_chars: int = 4000,
+    max_rows_per_sheet: int = 200000,
     max_cols: int = 50,
     start_chunk_index: int = 0,
+    full_index_rows: int = 2000,
+    max_chunks_per_file: int = 500,
+    table_gap_rows: int = 2,
+    sparse_threshold: float = 0.4,
 ) -> tuple[list[str], list[dict]]:
     """Helper function to parse and chunk Excel file in one call."""
     parser = ExcelParser(
         chunk_chars=chunk_chars,
         max_rows_per_sheet=max_rows_per_sheet,
         max_cols=max_cols,
+        full_index_rows=full_index_rows,
+        max_chunks_per_file=max_chunks_per_file,
+        table_gap_rows=table_gap_rows,
+        sparse_threshold=sparse_threshold,
     )
     return parser.parse_and_chunk(
         file_path=file_path,

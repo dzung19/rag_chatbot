@@ -234,6 +234,10 @@ async def _process_document(
                     chunk_chars=settings.excel_chunk_chars,
                     max_rows_per_sheet=settings.excel_max_rows_per_sheet,
                     max_cols=settings.excel_max_cols,
+                    full_index_rows=settings.excel_full_index_rows,
+                    max_chunks_per_file=settings.excel_max_chunks_per_file,
+                    table_gap_rows=settings.excel_table_gap_rows,
+                    sparse_threshold=settings.excel_sparse_threshold,
                 )
             else:
                 text_pages = list(parse_document(str(file_path), doc_type.value))
@@ -563,6 +567,10 @@ async def upload_document(
                 chunk_chars=settings.excel_chunk_chars,
                 max_rows_per_sheet=settings.excel_max_rows_per_sheet,
                 max_cols=settings.excel_max_cols,
+                full_index_rows=settings.excel_full_index_rows,
+                max_chunks_per_file=settings.excel_max_chunks_per_file,
+                table_gap_rows=settings.excel_table_gap_rows,
+                sparse_threshold=settings.excel_sparse_threshold,
             )
         else:
             text_pages = list(parse_document(str(file_path), doc_type.value))
