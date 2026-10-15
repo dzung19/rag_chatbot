@@ -33,7 +33,7 @@ class Skill(BaseModel):
     # Prompt & Execution controls
     system_prompt_addon: str = Field(
         ..., 
-        max_length=4000, 
+        max_length=16000, 
         description="Instructions appended to base system prompt"
     )
     temperature_override: Optional[float] = Field(
@@ -59,7 +59,7 @@ class SkillCreateRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=64)
     description: str = Field(..., max_length=256)
     type: SkillType = Field(default=SkillType.MAIN)
-    system_prompt_addon: str = Field(..., min_length=10, max_length=4000)
+    system_prompt_addon: str = Field(..., min_length=10, max_length=16000)
     temperature_override: Optional[float] = Field(default=None, ge=0.0, le=2.0)
     top_k_override: Optional[int] = Field(default=None, ge=1, le=50)
     icon: Optional[str] = Field(default="Sparkles")
@@ -67,7 +67,7 @@ class SkillCreateRequest(BaseModel):
 class SkillUpdateRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=2, max_length=64)
     description: Optional[str] = Field(None, max_length=256)
-    system_prompt_addon: Optional[str] = Field(None, min_length=10, max_length=4000)
+    system_prompt_addon: Optional[str] = Field(None, min_length=10, max_length=16000)
     temperature_override: Optional[float] = Field(None, ge=0.0, le=2.0)
     top_k_override: Optional[int] = Field(None, ge=1, le=50)
     icon: Optional[str] = None

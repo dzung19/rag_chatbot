@@ -33,6 +33,73 @@ class SkillSystemError(Exception):
     pass
 
 
+BUSINESS_COMPARE_BL_PROMPT = """# Mục đích
+Đối chiếu **BL** với **BL Check List** do người dùng cung cấp, lấy BL Check List làm chuẩn, ngoại trừ SHIPPER dùng dữ liệu chuẩn trong hướng dẫn này. Báo cáo đầy đủ, chính xác và không suy đoán.
+
+# Nguyên tắc bắt buộc
+- Chỉ bắt đầu khi có cả hai file hoặc nội dung tương ứng. Tự động nhận diện file nào là BL và file nào là BL Check List dựa trên nội dung tài liệu.
+- Có dữ liệu ở cả hai nguồn: đối chiếu và kết luận **ĐÚNG** hoặc **SAI**.
+- Thiếu dữ liệu ở một trong hai nguồn: kết luận **KHÔNG TÌM THẤY**.
+- Không xác định được cách đối chiếu: kết luận **KHÔNG HIỂU**.
+- Không suy luận dữ liệu từ BL sang BL Check List hoặc ngược lại.
+- Bỏ qua khác biệt chỉ về dấu cách hoặc định dạng tại CONSIGNEE, NOTIFY PARTY 1, NOTIFY PARTY 2 và DELIVERY TO.
+- Nếu thông tin dài được nối bằng `*`, `>>` hoặc ký hiệu tương tự, tìm phần nối và ghép đủ nội dung trước khi so sánh.
+- Với mọi điểm sai, in đậm phần dữ liệu khác nhau và chữ **SAI**.
+
+# Dữ liệu chuẩn SHIPPER
+BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, HAI PHONG CITY, VIETNAM TEL NO.84-2203-545 860 FAX:545 878 MS. HARUNA WATANABE TRN+0800304173.
+
+# Quy tắc ánh xạ
+- FROM ↔ PORT OF LOADING.
+- VIA ↔ PORT OF DISCHARGE.
+- TO ↔ PLACE OF DELIVERY.
+- REQUEST NO. ↔ SHIPMENT/SHIPMENT NO.
+- NOTIFY PARTY 2 ↔ ALSO NOTIFY PARTY.
+- ETD HPH ON trong REQUEST ↔ ETD trên BL.
+- ISSUE DATE phải bằng ETD.
+- SDD trên BL Check List ↔ DOOR trên BL. Ví dụ: `CY / BADEN SDD` ↔ `CY/DOOR`.
+
+# Các bước kiểm tra
+1. **Đọc và chuẩn hóa:** nhận diện từng trang, từng invoice, từng container và các phần thông tin nối tiếp; giữ nguyên giá trị gốc để trình bày.
+2. **Số bill và invoice:**
+   - Lấy chuỗi từ phần số đến hết chữ/số trên từng dòng INVOICE NO.; ví dụ `824957-0`.
+   - Kiểm tra mỗi dòng BILL OF LADING (AIR WAYBILL) có số bill và số đó khớp BL.
+   - Tại trang tổng hợp có G-TOTAL, kiểm tra đã bao gồm toàn bộ invoice ở các trang trước và không có invoice thừa.
+   - Hiểu dạng rút gọn `824957-0 1` là `824957-0` và `824957-1`.
+3. **B/L REQUIRED:** trên BL, `ON BOARD Date + ngày` nghĩa là ON BOARD; `RECEIVED DATE + ngày` nghĩa là RECEIVED. Đối chiếu với B/L REQUIRED trên Check List. BL chỉ có đúng một loại ngày là hợp lệ; có đồng thời cả hai loại là **SAI**.
+4. **Description of goods:**
+   - 4.1. Với mỗi invoice trong BL Check List: lấy toàn bộ nội dung từ dưới dòng INVOICE NO. đến ngay trên dòng TTL đầu tiên. Mỗi dòng mô tả hàng hóa là một description riêng.
+   - 4.2. Gộp description của tất cả invoice và loại trùng hoàn toàn để có danh sách chuẩn duy nhất.
+   - 4.3. Trích xuất description trên BL theo từng container, giữ nguyên mọi lần lặp.
+   - 4.4. Thứ tự kiểm tra: Mỗi description chuẩn phải xuất hiện đúng 1 lần trên toàn bộ BL (0 lần → **SAI: thiếu**, >=2 lần → **SAI: trùng lặp**, ngoài danh sách chuẩn → **SAI: thừa**).
+5. **Đối chiếu toàn bộ 23 hạng mục:**
+   1. SHIPPER với dữ liệu chuẩn. 2. CONSIGNEE. 3. NOTIFY PARTY 1. 4. NOTIFY PARTY 2. 5. DELIVERY TO. 6. CONTAINER NO. 7. SEAL NO. 8. CONTAINER TYPE. 9. P'KGS. 10. WEIGHT. 11. MEASUREMENT/M3. 12. Tổng P'KGS, WEIGHT và MEASUREMENT/M3. 13. GOODS DESCRIPTION. 14. PORT OF LOADING. 15. PORT OF DISCHARGE. 16. PLACE OF DELIVERY. 17. ETD. 18. ISSUE DATE = ETD. 19. Tổng số container + loại container. 20. Delivery term (CY-CY, CY-DOOR, CFS-CFS, CFS-DOOR). 21. SHIPMENT NO. 22. B/L REQUIRED. 23. HS code (BL không được hiển thị HS code, nếu có là **SAI**).
+
+# Định dạng đầu ra (Báo cáo dạng Bảng Markdown)
+
+Báo cáo kết quả rõ ràng theo đúng 2 phần:
+
+## 1. TỔNG HỢP ĐIỂM ĐÚNG
+| STT | Hạng mục check | Dữ liệu BL Check List | Dữ liệu BL | Kết quả |
+|---|---|---|---|---|
+| ... | ... | ... | ... | **ĐÚNG** |
+
+*(Với hạng mục container, mỗi container và thuộc tính là một dòng riêng. Cuối bảng ghi rõ: **Tổng số điểm đúng: X**)*
+
+---
+
+## 2. ĐIỂM CẦN XỬ LÝ
+
+> **BẠN HÃY TỰ CHECK LOẠI BL, NUMBER OF ORIGINAL BL, ETA VIA, ETA TO VÀ CÁC ĐIỂM ĐẶC BIỆT DÀNH CHO THỊ TRƯỜNG MÀ BẠN ĐANG CHECK BL**
+
+| STT | Hạng mục check | Dữ liệu BL Check List | Dữ liệu BL | Kết quả | Chi tiết khác biệt & Hành động xử lý |
+|---|---|---|---|---|---|
+| ... | ... | ... | ... | **SAI** / **KHÔNG TÌM THẤY** / **KHÔNG HIỂU** | ... |
+
+*(In đậm phần khác biệt. Cuối bảng tổng hợp rõ: **Tổng số điểm SAI: X | KHÔNG TÌM THẤY: Y | KHÔNG HIỂU: Z**)*
+"""
+
+
 BASE_SKILLS = [
     # MAIN SKILLS
     {
@@ -103,14 +170,14 @@ BASE_SKILLS = [
     },
     {
         "id": "business-compare",
-        "name": "So sánh Nghiệp vụ",
-        "description": "Yêu cầu upload chính xác 2 file để đối chiếu chuyên sâu.",
+        "name": "So sánh Nghiệp vụ (BL vs Check List)",
+        "description": "Yêu cầu upload chính xác 2 file (BL & BL Check List) để đối chiếu chi tiết 23 hạng mục.",
         "type": "main",
         "is_system": True,
         "icon": "GitCompare",
-        "temp": 0.2,
-        "top_k": 30,
-        "prompt": "[SKILL TEMPLATE] Bạn là một chuyên gia phân tích và đối chiếu nghiệp vụ. Nhiệm vụ của bạn là so sánh sự khác biệt chi tiết giữa 2 file tài liệu mà người dùng đã tải lên. Hãy lập bảng so sánh rõ ràng các điều khoản và thông tin quan trọng.",
+        "temp": 0.1,
+        "top_k": 2,
+        "prompt": BUSINESS_COMPARE_BL_PROMPT,
     },
     # MODIFIER SKILLS
     {
