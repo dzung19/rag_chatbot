@@ -16,6 +16,7 @@ from sqlalchemy import (
     BigInteger,
     Column,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -86,6 +87,60 @@ class IngestionDocument(Base):
     )
 
 
+class FullDocument(Base):
+    """Stores full continuous text of documents for business comparison."""
+
+    __tablename__ = "full_documents"
+
+    document_id = Column(String(36), primary_key=True)
+    filename = Column(String(512), nullable=False)
+    full_text = Column(Text, nullable=False)
+    page_count = Column(Integer, nullable=False, default=1)
+    file_size_bytes = Column(BigInteger, nullable=False, default=0)
+    file_type = Column(String(32), nullable=False, default="txt")
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        Index("ix_full_documents_created_at", "created_at"),
+    )
+
+
+class DocumentChunk(Base):
+    """Stores chunked text representations and metadata matching ERD."""
+
+    __tablename__ = "document_chunks"
+
+    id = Column(String(64), primary_key=True)
+    document_id = Column(
+        String(36),
+        ForeignKey("ingestion_documents.document_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    filename = Column(String(512), nullable=False)
+    chunk_index = Column(Integer, nullable=False, default=0)
+    page = Column(Integer, nullable=False, default=0)
+    heading = Column(Text, nullable=False, default="")
+    text = Column(Text, nullable=False)
+    vector_id = Column(String(64), nullable=True)
+    embedding_model = Column(String(64), nullable=False, default="nomic-embed-text")
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        Index("uq_document_chunks_doc_chunk", "document_id", "chunk_index", unique=True),
+        Index("ix_document_chunks_document_id", "document_id"),
+    )
+
+
+
+
 def _row_to_doc_info(row: IngestionDocument) -> DocumentInfo:
     file_type_val = row.file_type.lower()
     allowed_types = {e.value: e for e in DocumentType}
@@ -142,11 +197,19 @@ class StateStore:
         )
 
     def init_db(self) -> None:
-        """Create tables and partial unique index if they do not exist."""
+        """Create tables, extensions, and indices if they do not exist."""
         try:
-            Base.metadata.create_all(self.engine)
             if not self.is_sqlite:
-                with self.engine.connect() as conn:
+                with self.engine.begin() as conn:
+                    try:
+                        conn.execute(text("CREATE EXTENSION IF NOT EXISTS unaccent;"))
+                    except Exception as e:
+                        logger.debug("unaccent extension creation notice: %s", str(e))
+
+            Base.metadata.create_all(self.engine)
+
+            if not self.is_sqlite:
+                with self.engine.begin() as conn:
                     conn.execute(
                         text(
                             """
@@ -156,7 +219,28 @@ class StateStore:
                             """
                         )
                     )
-                    conn.commit()
+                    # Add tsvector generated column and GIN index if not present
+                    try:
+                        conn.execute(
+                            text(
+                                """
+                                DO $$
+                                BEGIN
+                                    IF NOT EXISTS (
+                                        SELECT 1 FROM information_schema.columns 
+                                        WHERE table_name='document_chunks' AND column_name='tsv'
+                                    ) THEN
+                                        ALTER TABLE document_chunks 
+                                        ADD COLUMN tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', unaccent(text))) STORED;
+                                        CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON document_chunks USING GIN(tsv);
+                                    END IF;
+                                END $$;
+                                """
+                            )
+                        )
+                    except Exception as e:
+                        logger.debug("TSV column creation notice: %s", str(e))
+
             logger.info("Initialized ingestion state store on database: %s", self.db_url.split("@")[-1])
         except Exception as e:
             logger.error("Failed to initialize ingestion state store DB: %s", str(e), exc_info=True)
@@ -355,6 +439,110 @@ class StateStore:
             session.execute(stmt)
             session.commit()
 
+    def save_full_document(
+        self,
+        document_id: str,
+        filename: str,
+        full_text: str,
+        page_count: int,
+        file_size_bytes: int,
+        file_type: str,
+    ) -> None:
+        """Save or replace full document text in PostgreSQL."""
+        with self.SessionLocal() as session:
+            existing = session.get(FullDocument, document_id)
+            now = datetime.now(timezone.utc)
+            if existing:
+                existing.filename = filename
+                existing.full_text = full_text
+                existing.page_count = page_count
+                existing.file_size_bytes = file_size_bytes
+                existing.file_type = file_type
+                existing.created_at = now
+            else:
+                doc = FullDocument(
+                    document_id=document_id,
+                    filename=filename,
+                    full_text=full_text,
+                    page_count=page_count,
+                    file_size_bytes=file_size_bytes,
+                    file_type=file_type,
+                    created_at=now,
+                )
+                session.add(doc)
+            session.commit()
+
+    def save_document_chunks(
+        self,
+        document_id: str,
+        filename: str,
+        chunks: list[dict],
+        embedding_model: str = "nomic-embed-text",
+    ) -> None:
+        """Save chunked representations to PostgreSQL."""
+        if not chunks:
+            return
+        with self.SessionLocal() as session:
+            session.execute(
+                delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
+            )
+            now = datetime.now(timezone.utc)
+            chunk_objs = []
+            for c in chunks:
+                chunk_id = f"{document_id}_chunk_{c.get('chunk_index', 0)}"
+                chunk_objs.append(
+                    DocumentChunk(
+                        id=chunk_id,
+                        document_id=document_id,
+                        filename=filename,
+                        chunk_index=c.get("chunk_index", 0),
+                        page=c.get("page", 0),
+                        heading=c.get("heading", ""),
+                        text=c["text"],
+                        vector_id=chunk_id,
+                        embedding_model=embedding_model,
+                        created_at=now,
+                    )
+                )
+            session.add_all(chunk_objs)
+            session.commit()
+
+    def get_full_documents(self, document_ids: list[str]) -> list[dict]:
+        """Fetch full documents by IDs."""
+        if not document_ids:
+            return []
+        with self.SessionLocal() as session:
+            stmt = select(FullDocument).where(FullDocument.document_id.in_(document_ids))
+            rows = session.scalars(stmt).all()
+            return [
+                {
+                    "document_id": r.document_id,
+                    "filename": r.filename,
+                    "full_text": r.full_text,
+                    "page_count": r.page_count,
+                    "file_size_bytes": r.file_size_bytes,
+                    "file_type": r.file_type,
+                    "created_at": r.created_at,
+                }
+                for r in rows
+            ]
+
+    def has_full_document(self, document_id: str) -> bool:
+        """Check if full document exists in PostgreSQL."""
+        with self.SessionLocal() as session:
+            stmt = select(FullDocument.document_id).where(FullDocument.document_id == document_id)
+            return session.scalar(stmt) is not None
+
+    def delete_full_document(self, document_id: str) -> bool:
+        """Delete full document from PostgreSQL."""
+        with self.SessionLocal() as session:
+            doc = session.get(FullDocument, document_id)
+            if doc:
+                session.delete(doc)
+                session.commit()
+                return True
+            return False
+
     def delete_document(self, document_id: str) -> Optional[DocumentInfo]:
         """Delete document from state store and return deleted record."""
         with self.SessionLocal() as session:
@@ -363,6 +551,9 @@ class StateStore:
                 return None
             doc_info = _row_to_doc_info(doc)
             session.delete(doc)
+            full_doc = session.get(FullDocument, document_id)
+            if full_doc:
+                session.delete(full_doc)
             session.commit()
             return doc_info
 

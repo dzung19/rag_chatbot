@@ -139,7 +139,47 @@ class Retriever:
         return int(match.group(1)) if match else None
     
     async def _keyword_search(self, query: str, top_k: int = 20) -> list[dict]:
-        """Perform BM25 keyword search using SQLite FTS5 with word-level OR matching."""
+        # 1. Try PostgreSQL Full-Text Search (unaccent + GIN tsvector) first
+        try:
+            from shared.db import is_postgres_available, get_db_engine
+            if is_postgres_available():
+                from sqlalchemy import text
+                engine = get_db_engine()
+                with engine.connect() as pg_conn:
+                    stmt = text(
+                        """
+                        SELECT id, document_id, filename, page, heading, text,
+                               ts_rank_cd(tsv, plainto_tsquery('simple', unaccent(:q))) AS rank_score
+                        FROM document_chunks
+                        WHERE tsv @@ plainto_tsquery('simple', unaccent(:q))
+                        ORDER BY rank_score DESC
+                        LIMIT :limit
+                        """
+                    )
+                    pg_results = pg_conn.execute(stmt, {"q": query, "limit": top_k}).mappings().fetchall()
+                    if pg_results:
+                        results = []
+                        for row in pg_results:
+                            score = float(row["rank_score"] or 0.0)
+                            results.append(
+                                {
+                                    "id": row["id"],
+                                    "text": row["text"],
+                                    "metadata": {
+                                        "document_id": row["document_id"],
+                                        "filename": row["filename"],
+                                        "page": row["page"],
+                                        "heading": row["heading"] or "",
+                                        "chunk_index": self._chunk_index_from_id(row["id"]),
+                                    },
+                                    "score": round(score, 4),
+                                }
+                            )
+                        return results
+        except Exception as e:
+            logger.debug("PostgreSQL keyword search notice: %s", str(e))
+
+        # 2. Fallback to SQLite FTS5
         try:
             conn = get_sqlite_connection()
             # Tokenize into clean alphanumeric words
@@ -287,43 +327,67 @@ class Retriever:
             return []
 
         try:
-            conn = get_sqlite_connection()
-            placeholders = ",".join("?" for _ in document_ids)
-
-            # 1. Check full_documents table first (clean, unchunked text)
             full_rows = {}
-            try:
-                full_cur = conn.execute(
-                    f"""
-                    SELECT document_id, filename, full_text, page_count
-                    FROM full_documents
-                    WHERE document_id IN ({placeholders})
-                    """,
-                    tuple(document_ids),
-                )
-                full_rows = {row["document_id"]: row for row in full_cur.fetchall()}
-            except sqlite3.OperationalError:
-                full_rows = {}
 
-            # 2. Check document_chunks table for any documents not found in full_documents
+            # 1. Check PostgreSQL full_documents table first if available
+            try:
+                from shared.db import is_postgres_available, get_db_engine
+                if is_postgres_available():
+                    from sqlalchemy import text
+                    engine = get_db_engine()
+                    with engine.connect() as pg_conn:
+                        stmt = text(
+                            "SELECT document_id, filename, full_text, page_count "
+                            "FROM full_documents WHERE document_id = ANY(:ids)"
+                        )
+                        pg_rows = pg_conn.execute(stmt, {"ids": document_ids}).mappings().fetchall()
+                        for r in pg_rows:
+                            full_rows[r["document_id"]] = dict(r)
+            except Exception as e:
+                logger.debug("PostgreSQL full_documents lookup failed: %s", str(e))
+
+            # 2. Check SQLite for any documents not found in PostgreSQL (backward compatibility)
             missing_ids = [doc_id for doc_id in document_ids if doc_id not in full_rows]
-            chunk_docs_by_id: dict[str, list] = {doc_id: [] for doc_id in missing_ids}
+            chunk_docs_by_id: dict[str, list] = {}
 
             if missing_ids:
-                missing_placeholders = ",".join("?" for _ in missing_ids)
-                chunk_query = f"""
-                    SELECT rowid, id, document_id, filename, page, heading, text
-                    FROM document_chunks
-                    WHERE document_id IN ({missing_placeholders})
-                    ORDER BY document_id, rowid ASC
-                """
-                chunk_cursor = conn.execute(chunk_query, tuple(missing_ids))
-                for row in chunk_cursor.fetchall():
-                    d_id = row["document_id"]
-                    if d_id in chunk_docs_by_id:
-                        chunk_docs_by_id[d_id].append(row)
+                try:
+                    conn = get_sqlite_connection()
+                    placeholders = ",".join("?" for _ in missing_ids)
+                    try:
+                        full_cur = conn.execute(
+                            f"""
+                            SELECT document_id, filename, full_text, page_count
+                            FROM full_documents
+                            WHERE document_id IN ({placeholders})
+                            """,
+                            tuple(missing_ids),
+                        )
+                        for r in full_cur.fetchall():
+                            full_rows[r["document_id"]] = dict(r)
+                    except sqlite3.OperationalError:
+                        pass
 
-            conn.close()
+                    # Check document_chunks table for any documents still not found
+                    still_missing = [doc_id for doc_id in missing_ids if doc_id not in full_rows]
+                    if still_missing:
+                        chunk_docs_by_id = {doc_id: [] for doc_id in still_missing}
+                        missing_placeholders = ",".join("?" for _ in still_missing)
+                        chunk_query = f"""
+                            SELECT rowid, id, document_id, filename, page, heading, text
+                            FROM document_chunks
+                            WHERE document_id IN ({missing_placeholders})
+                            ORDER BY document_id, rowid ASC
+                        """
+                        chunk_cursor = conn.execute(chunk_query, tuple(still_missing))
+                        for row in chunk_cursor.fetchall():
+                            d_id = row["document_id"]
+                            if d_id in chunk_docs_by_id:
+                                chunk_docs_by_id[d_id].append(row)
+
+                    conn.close()
+                except Exception as e:
+                    logger.warning("SQLite full_documents fallback failed: %s", str(e))
 
             full_docs = []
             for doc_id in document_ids:
@@ -362,7 +426,7 @@ class Retriever:
 
             return full_docs
         except Exception as e:
-            logger.error("Failed to fetch full documents from SQLite: %s", str(e), exc_info=True)
+            logger.error("Failed to fetch full documents: %s", str(e), exc_info=True)
             return []
 
     async def close(self) -> None:

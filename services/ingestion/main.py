@@ -70,13 +70,13 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # 1. Initialize PostgreSQL state store tables & partial indices
     store = get_state_store()
-    store.init_db()
+    await asyncio.to_thread(store.init_db)
 
     # 2. Mark any dangling/interrupted tasks from previous crash as failed
-    store.clean_interrupted_tasks(grace_minutes=10)
+    await asyncio.to_thread(store.clean_interrupted_tasks, grace_minutes=10)
 
     # 3. Backfill document metadata from Qdrant into PostgreSQL if missing
-    _backfill_from_qdrant()
+    await asyncio.to_thread(_backfill_from_qdrant)
     yield
 
 app = FastAPI(
@@ -198,8 +198,9 @@ class DocumentCancelledError(Exception):
     """Document bị xóa trong lúc đang ingest."""
 
 
-def _ensure_not_cancelled(document_id: str) -> None:
-    if get_state_store().is_cancelled(document_id):
+async def _ensure_not_cancelled(document_id: str) -> None:
+    is_cancelled = await asyncio.to_thread(get_state_store().is_cancelled, document_id)
+    if is_cancelled:
         raise DocumentCancelledError(document_id)
 
 # ---------------------------------------------------------------------------
@@ -240,15 +241,19 @@ async def _process_document(
                     sparse_threshold=settings.excel_sparse_threshold,
                 )
             else:
-                text_pages = list(parse_document(str(file_path), doc_type.value))
-                if not text_pages:
-                    raise ValueError("No text extracted from document.")
-                chunks = chunk_document_pages(
-                    pages=text_pages,
-                    chunk_size=settings.chunk_size,
-                    chunk_overlap=settings.chunk_overlap,
-                    source_filename=original_filename,
-                )
+                def _parse_and_chunk_sync():
+                    pages = list(parse_document(str(file_path), doc_type.value))
+                    if not pages:
+                        raise ValueError("No text extracted from document.")
+                    ch = chunk_document_pages(
+                        pages=pages,
+                        chunk_size=settings.chunk_size,
+                        chunk_overlap=settings.chunk_overlap,
+                        source_filename=original_filename,
+                    )
+                    return pages, ch
+
+                text_pages, chunks = await asyncio.to_thread(_parse_and_chunk_sync)
             logger.info(
                 "Document %s (%d pages) split into %d chunks",
                 document_id,
@@ -256,14 +261,24 @@ async def _process_document(
                 len(chunks),
             )
 
-        store.update_progress(document_id, chunks_processed=0, total_chunks=len(chunks))
+        await asyncio.to_thread(
+            store.update_progress,
+            document_id,
+            chunks_processed=0,
+            total_chunks=len(chunks),
+        )
 
         # 3. Generate embeddings with batching and progress tracking
         embed_client = _get_embed_client()
         chunk_texts = [c["text"] for c in chunks]
 
-        def update_progress(done: int, total: int):
-            store.update_progress(document_id, chunks_processed=done, total_chunks=total)
+        async def update_progress(done: int, total: int):
+            await asyncio.to_thread(
+                store.update_progress,
+                document_id,
+                chunks_processed=done,
+                total_chunks=total,
+            )
 
         embeddings = await embed_client.embed_batch(
             chunk_texts,
@@ -308,7 +323,7 @@ async def _process_document(
                 )
             )
 
-        _ensure_not_cancelled(document_id)
+        await _ensure_not_cancelled(document_id)
 
         # Batch upsert to Qdrant
         qdrant_batch_size = 100
@@ -321,26 +336,36 @@ async def _process_document(
                 wait = True
             )
 
-        # 4.5. Ensure SQLite has both full_documents and document_chunks
+        # 4.5. Ensure SQLite and PostgreSQL have both full_documents and document_chunks
         if not sqlite_saved:
             full_text = "\n\n".join(p.strip() for p in text_pages if p and p.strip())
-            save_document_full_and_chunks(
-                    document_id=document_id,
-                    filename=original_filename,
-                    full_text=full_text,
-                    page_count=len(text_pages),
-                    file_size_bytes=file_path.stat().st_size if file_path.exists() else 0,
-                    file_type=doc_type.value,
-                    chunks=chunks,
-                )
+            await asyncio.to_thread(
+                store.save_full_document,
+                document_id=document_id,
+                filename=original_filename,
+                full_text=full_text,
+                page_count=len(text_pages),
+                file_size_bytes=file_path.stat().st_size if file_path.exists() else 0,
+                file_type=doc_type.value,
+            )
+            await asyncio.to_thread(
+                save_document_full_and_chunks,
+                document_id=document_id,
+                filename=original_filename,
+                full_text=full_text,
+                page_count=len(text_pages),
+                file_size_bytes=file_path.stat().st_size if file_path.exists() else 0,
+                file_type=doc_type.value,
+                chunks=chunks,
+            )
         else:
-            logger.info("SQLite already populated at upload, skipping. document_id=%s",
+            logger.info("Storage already populated at upload, skipping. document_id=%s",
                 document_id,)
 
-        _ensure_not_cancelled(document_id)
+        await _ensure_not_cancelled(document_id)
 
         # 5. Update status
-        store.mark_completed(document_id, len(chunks))
+        await asyncio.to_thread(store.mark_completed, document_id, len(chunks))
 
         logger.info(
             "Document %s ingested successfully: %d chunks stored",
@@ -390,7 +415,7 @@ async def _process_document(
                 "Failed to clean SQLite for document %s", document_id
             )
 
-        store.mark_failed(document_id, str(e))
+        await asyncio.to_thread(store.mark_failed, document_id, str(e))
 
 
 def _backfill_from_qdrant() -> None:
@@ -529,15 +554,23 @@ async def upload_document(
     store = get_state_store()
 
     # Check for existing document in PostgreSQL
-    existing = store.get_document_by_hash(content_hash)
+    existing = await asyncio.to_thread(store.get_document_by_hash, content_hash)
     if existing and existing.status != IngestionStatusEnum.FAILED:
-        conn = get_sqlite_connection()
-        cur = conn.execute("SELECT 1 FROM full_documents WHERE document_id = ?", (existing.document_id,))
-        in_sqlite = cur.fetchone() is not None
-        conn.close()
-        if in_sqlite:
+        in_storage = await asyncio.to_thread(store.has_full_document, existing.document_id)
+        if not in_storage:
+            def _check_sqlite_exists(d_id: str) -> bool:
+                conn = get_sqlite_connection()
+                try:
+                    cur = conn.execute("SELECT 1 FROM full_documents WHERE document_id = ?", (d_id,))
+                    return cur.fetchone() is not None
+                finally:
+                    conn.close()
+
+            in_storage = await asyncio.to_thread(_check_sqlite_exists, existing.document_id)
+
+        if in_storage:
             logger.info(
-                "Duplicate upload '%s' -> reuse document %s (verified in SQLite)",
+                "Duplicate upload '%s' -> reuse document %s (verified in storage)",
                 file.filename,
                 existing.document_id,
             )
@@ -552,10 +585,9 @@ async def upload_document(
     safe_filename = f"{document_id}{ext}"
     file_path = UPLOAD_DIR / safe_filename
 
-    with open(file_path, "wb") as f:
-        f.write(content)
+    await asyncio.to_thread(file_path.write_bytes, content)
 
-    # 4.1 Parse text and commit to SQLite immediately (instant availability for comparison & search)
+    # 4.1 Parse text and commit to PostgreSQL & SQLite immediately (instant availability)
     try:
         if doc_type == DocumentType.XLSX:
             from excel_parser import parse_and_chunk_excel
@@ -573,20 +605,35 @@ async def upload_document(
                 sparse_threshold=settings.excel_sparse_threshold,
             )
         else:
-            text_pages = list(parse_document(str(file_path), doc_type.value))
-            if not text_pages:
-                raise ValueError("No text extracted from document.")
-            chunks = chunk_document_pages(
-                pages=text_pages,
-                chunk_size=settings.chunk_size,
-                chunk_overlap=settings.chunk_overlap,
-                source_filename=file.filename,
-            )
+            def _parse_and_chunk():
+                pages = list(parse_document(str(file_path), doc_type.value))
+                if not pages:
+                    raise ValueError("No text extracted from document.")
+                ch = chunk_document_pages(
+                    pages=pages,
+                    chunk_size=settings.chunk_size,
+                    chunk_overlap=settings.chunk_overlap,
+                    source_filename=file.filename,
+                )
+                return pages, ch
+
+            text_pages, chunks = await asyncio.to_thread(_parse_and_chunk)
 
         if not text_pages:
             raise ValueError("No text extracted from document.")
 
         full_text = "\n\n".join(p.strip() for p in text_pages if p and p.strip())
+        # Save to PostgreSQL full_documents
+        await asyncio.to_thread(
+            store.save_full_document,
+            document_id=document_id,
+            filename=file.filename,
+            full_text=full_text,
+            page_count=len(text_pages),
+            file_size_bytes=len(content),
+            file_type=doc_type.value,
+        )
+        # Also save to SQLite (for backward compatibility during migration)
         await asyncio.to_thread(
             save_document_full_and_chunks,
             document_id=document_id,
@@ -599,7 +646,7 @@ async def upload_document(
         )
     except Exception as e:
         logger.error("Failed to extract and store document text for %s: %s", document_id, str(e), exc_info=True)
-        file_path.unlink(missing_ok=True)
+        await asyncio.to_thread(file_path.unlink, missing_ok=True)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot extract text from file: {str(e)}",
@@ -615,7 +662,8 @@ async def upload_document(
     )
 
     # 5. Atomically claim document in PostgreSQL
-    doc_info, is_new = store.claim_document(
+    doc_info, is_new = await asyncio.to_thread(
+        store.claim_document,
         document_id=document_id,
         filename=file.filename,
         doc_type=doc_type.value,
@@ -630,7 +678,12 @@ async def upload_document(
             status=doc_info.status,
         )
 
-    store.update_progress(document_id, chunks_processed=0, total_chunks=len(chunks))
+    await asyncio.to_thread(
+        store.update_progress,
+        document_id,
+        chunks_processed=0,
+        total_chunks=len(chunks),
+    )
 
     # 6. Queue background processing (embeddings and Qdrant vector indexing)
     background_tasks.add_task(
@@ -655,14 +708,14 @@ async def upload_document(
 @app.get("/ingest/documents", response_model=DocumentListResponse)
 async def list_documents():
     """List all indexed documents."""
-    docs = get_state_store().list_documents()
+    docs = await asyncio.to_thread(get_state_store().list_documents)
     return DocumentListResponse(documents=docs, total=len(docs))
 
 
 @app.get("/ingest/documents/{document_id}/status", response_model=IngestionStatus)
 async def get_ingestion_status(document_id: str):
     """Get the ingestion status for a document."""
-    task = get_state_store().get_task_status(document_id)
+    task = await asyncio.to_thread(get_state_store().get_task_status, document_id)
     if not task:
         raise HTTPException(status_code=404, detail="Document not found.")
     return task
@@ -672,7 +725,7 @@ async def get_ingestion_status(document_id: str):
 async def delete_document(document_id: str):
     """Delete a document and its embeddings from the vector store."""
     store = get_state_store()
-    doc_info = store.delete_document(document_id)
+    doc_info = await asyncio.to_thread(store.delete_document, document_id)
     if not doc_info:
         raise HTTPException(status_code=404, detail="Document not found.")
 
@@ -681,7 +734,8 @@ async def delete_document(document_id: str):
         client = _get_qdrant_client()
         settings = get_settings()
 
-        client.delete(
+        await asyncio.to_thread(
+            client.delete,
             collection_name=settings.qdrant_collection,
             points_selector=Filter(
                 must=[
@@ -690,7 +744,7 @@ async def delete_document(document_id: str):
                         match=MatchValue(value=document_id)
                     )
                 ]
-            )
+            ),
         )
         logger.info("Deleted chunks for document %s from Qdrant", document_id)
     except Exception as e:
@@ -698,7 +752,7 @@ async def delete_document(document_id: str):
 
     # Remove from SQLite (full_documents and document_chunks)
     try:
-        delete_document_from_sqlite(document_id)
+        await asyncio.to_thread(delete_document_from_sqlite, document_id)
     except Exception as e:
         logger.error("Failed to delete from SQLite: %s", str(e))
 
@@ -706,7 +760,7 @@ async def delete_document(document_id: str):
     ext = f".{doc_info.file_type.value}"
     file_path = UPLOAD_DIR / f"{document_id}{ext}"
     if file_path.exists():
-        file_path.unlink()
+        await asyncio.to_thread(file_path.unlink, missing_ok=True)
 
     return JSONResponse(content={"message": "Document deleted successfully."})
 
@@ -754,7 +808,7 @@ async def cleanup_orphans(
     # Đồng bộ lại trạng thái trong PostgreSQL.
     store = get_state_store()
     for doc_id in report.deleted_ids:
-        store.delete_document(doc_id)
+        await asyncio.to_thread(store.delete_document, doc_id)
 
     return asdict(report)
 
@@ -763,22 +817,26 @@ async def health_check():
     """Health check endpoint checking Qdrant and PostgreSQL."""
     from sqlalchemy import text
 
-    qdrant_ok = False
-    db_ok = False
+    def _check_qdrant() -> bool:
+        try:
+            client = _get_qdrant_client()
+            client.get_collections()
+            return True
+        except Exception:
+            return False
 
-    try:
-        client = _get_qdrant_client()
-        client.get_collections()
-        qdrant_ok = True
-    except Exception:
-        pass
+    def _check_db() -> bool:
+        try:
+            with get_state_store().engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return True
+        except Exception:
+            return False
 
-    try:
-        with get_state_store().engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        db_ok = True
-    except Exception:
-        pass
+    qdrant_ok, db_ok = await asyncio.gather(
+        asyncio.to_thread(_check_qdrant),
+        asyncio.to_thread(_check_db),
+    )
 
     all_ok = qdrant_ok and db_ok
     details = f"Qdrant: {'connected' if qdrant_ok else 'unavailable'} | DB: {'connected' if db_ok else 'unavailable'}"

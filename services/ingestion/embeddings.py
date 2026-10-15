@@ -6,6 +6,7 @@ Generates text embeddings using the nomic-embed-text model via Ollama's
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Callable, Optional
 
@@ -96,7 +97,9 @@ class EmbeddingClient:
 
             if on_progress:
                 try:
-                    on_progress(min(i + len(batch), len(texts)), len(texts))
+                    res = on_progress(min(i + len(batch), len(texts)), len(texts))
+                    if inspect.isawaitable(res):
+                        await res
                 except Exception:
                     pass
 

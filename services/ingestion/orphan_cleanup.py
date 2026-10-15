@@ -97,23 +97,44 @@ def _scan_qdrant(client, collection: str) -> dict[str, dict[str, Any]]:
     return dict(stats)
 
 
-def _scan_sqlite() -> tuple[dict[str, datetime | None], set[str]]:
-    conn = get_sqlite_connection()
+def _scan_databases() -> tuple[dict[str, datetime | None], set[str]]:
+    documents: dict[str, datetime | None] = {}
+    chunk_doc_ids: set[str] = set()
+
+    # 1. Scan PostgreSQL if available
     try:
-        documents = {
-            _parse_ts(row[1])
-            for row in conn.execute(
-                "SELECT document_id, created_at FROM full_documents"
-            )
-        }
-        chunk_doc_ids = {
-            row[0]
-            for row in conn.execute(
-                "SELECT DISTINCT document_id FROM document_chunks"
-            )
-        }
-    finally:
-        conn.close()
+        from shared.db import is_postgres_available, get_db_engine
+        if is_postgres_available():
+            from sqlalchemy import text
+            engine = get_db_engine()
+            with engine.connect() as pg_conn:
+                full_rows = pg_conn.execute(
+                    text("SELECT document_id, created_at FROM full_documents")
+                ).fetchall()
+                for row in full_rows:
+                    documents[row[0]] = _parse_ts(row[1])
+
+                chunk_rows = pg_conn.execute(
+                    text("SELECT DISTINCT document_id FROM document_chunks")
+                ).fetchall()
+                for row in chunk_rows:
+                    chunk_doc_ids.add(row[0])
+    except Exception as e:
+        logger.debug("PostgreSQL orphan scan notice: %s", str(e))
+
+    # 2. Merge with SQLite (backward compatibility)
+    try:
+        conn = get_sqlite_connection()
+        try:
+            for row in conn.execute("SELECT document_id, created_at FROM full_documents"):
+                if row[0] not in documents:
+                    documents[row[0]] = _parse_ts(row[1])
+            for row in conn.execute("SELECT DISTINCT document_id FROM document_chunks"):
+                chunk_doc_ids.add(row[0])
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("SQLite orphan scan notice: %s", str(e))
 
     return documents, chunk_doc_ids
 
@@ -152,11 +173,11 @@ def run_orphan_cleanup(
         return ts is not None and ts < cutoff
 
     qdrant_stats = _scan_qdrant(qdrant_client, collection)
-    sqlite_docs, chunk_doc_ids = _scan_sqlite()
+    sqlite_docs, chunk_doc_ids = _scan_databases()
 
     to_delete: set[str] = set()
 
-    # 1. Qdrant có points nhưng SQLite không có tài liệu.
+    # 1. Qdrant có points nhưng DB không có tài liệu.
     for doc_id, item in qdrant_stats.items():
         if doc_id in sqlite_docs:
             continue
@@ -167,7 +188,7 @@ def run_orphan_cleanup(
             report.qdrant_without_sqlite.append(doc_id)
             to_delete.add(doc_id)
 
-    # 2 + 3. SQLite có tài liệu nhưng Qdrant trống hoặc thiếu chunk.
+    # 2 + 3. DB có tài liệu nhưng Qdrant trống hoặc thiếu chunk.
     for doc_id, created_at in sqlite_docs.items():
         if is_processing(doc_id):
             if is_old(created_at):
@@ -228,7 +249,21 @@ def run_orphan_cleanup(
             continue  # Kiểm tra lại ngay trước khi xóa.
         try:
             _delete_qdrant_document(qdrant_client, collection, doc_id)
-            delete_document_from_sqlite(doc_id)
+            try:
+                delete_document_from_sqlite(doc_id)
+            except Exception:
+                pass
+            try:
+                from shared.db import is_postgres_available, get_db_engine
+                if is_postgres_available():
+                    from sqlalchemy import text
+                    engine = get_db_engine()
+                    with engine.begin() as pg_conn:
+                        pg_conn.execute(text("DELETE FROM full_documents WHERE document_id = :id"), {"id": doc_id})
+                        pg_conn.execute(text("DELETE FROM document_chunks WHERE document_id = :id"), {"id": doc_id})
+                        pg_conn.execute(text("DELETE FROM ingestion_documents WHERE document_id = :id"), {"id": doc_id})
+            except Exception as e:
+                logger.debug("PostgreSQL orphan delete notice: %s", str(e))
             for file_path in upload_dir.glob(f"{doc_id}.*"):
                 file_path.unlink(missing_ok=True)
                 report.deleted_files += 1

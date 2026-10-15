@@ -134,8 +134,11 @@ services:
       - LLM_QUEUE_TIMEOUT=${LLM_QUEUE_TIMEOUT:-120}
       - QDRANT_URL=${QDRANT_URL:-http://host.docker.internal:6333}
       - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg://rag_user:rag_password@postgres:5432/rag_chatbot}
     depends_on:
       ollama:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -161,8 +164,12 @@ services:
       - shared_data:/app/shared_data
     env_file: .env
     environment:
-      - CONVERSATION_DATABASE_URL=sqlite:////app/shared_data/chat_history.db
+      - CONVERSATION_DATABASE_URL=${DATABASE_URL:-postgresql+psycopg://rag_user:rag_password@postgres:5432/rag_chatbot}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg://rag_user:rag_password@postgres:5432/rag_chatbot}
       - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-rag-internal-key}
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8005/health || exit 1"]
@@ -191,7 +198,10 @@ services:
       - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-rag-internal-key}
       - ONEDRIVE_CONNECTOR_URL=http://onedrive-connector:8004
       - LOKI_URL=http://loki:3100
+      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg://rag_user:rag_password@postgres:5432/rag_chatbot}
     depends_on:
+      postgres:
+        condition: service_healthy
       ingestion:
         condition: service_healthy
       rag-engine:
