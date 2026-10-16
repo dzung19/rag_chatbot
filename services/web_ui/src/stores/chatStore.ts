@@ -323,260 +323,217 @@ export const useChatStore = create<ChatState>()(
 
       sendMessage: async (query: string, attachedFiles?: File[]) => {
         const trimmedQuery = query.trim();
-        const hasFiles = attachedFiles && attachedFiles.length > 0;
+        const files = attachedFiles ?? [];
+        const hasFiles = files.length > 0;
+
         if (!trimmedQuery && !hasFiles) return;
         if (get().isStreaming) return;
 
-        let activeId = get().activeId;
-        if (!activeId || !get().conversations[activeId]) {
-          activeId = get().newConversation();
+        // Xác định cuộc trò chuyện đang dùng
+        let currentId = get().activeId;
+        if (!currentId || !get().conversations[currentId]) {
+          currentId = get().newConversation();
         }
+        const conversationId: string = currentId;
 
-        const uploadedDocumentIds: string[] = [];
+        // Tạo controller ngay từ đầu để nút Stop dùng được cả lúc đang upload
+        const controller = new AbortController();
+        activeAbortController = controller;
+        set({ isStreaming: true });
 
-        // 1. Handle file uploads if any
-        if (hasFiles) {
-          set({ isStreaming: true });
-
-          try {
-            for (const file of attachedFiles) {
-              const res = await uploadDocumentFile(file);
-              if (res?.document_id) {
-                uploadedDocumentIds.push(res.document_id);
-              }
-            }
-
-            useToastStore
-              .getState()
-              .pushToast(
-                `Đã tải lên thành công ${attachedFiles.length} tài liệu`,
-                "success"
-              );
-          } catch (err: unknown) {
-            const errorMsg =
-              err instanceof Error ? err.message : "Failed to upload attachments";
-            set({ isStreaming: false });
-            useToastStore.getState().pushToast(errorMsg, "error");
-            return;
-          }
-        }
-
-        // If no text query was provided, stop here after upload
-        if (!trimmedQuery) {
-          set({ isStreaming: false });
-          return;
-        }
-
-        // 2. Add User Message
         const userMsgId = generateUuid();
-        const userMsg: ChatMessage = {
-          id: userMsgId,
-          role: "user",
-          content: trimmedQuery,
-          sources: [],
-          status: "done",
-          createdAt: Date.now(),
-        };
-
-        // 3. Add Assistant Message placeholder
         const assistantMsgId = generateUuid();
-        const assistantMsg: ChatMessage = {
-          id: assistantMsgId,
-          role: "assistant",
-          content: "",
-          sources: [],
-          status: "streaming",
-          createdAt: Date.now(),
-        };
-
         let isFirstMessage = false;
         let nextTitle = "";
-
-        const currentConv = activeId ? get().conversations[activeId] : null;
-        let selectedDocIds = [...uploadedDocumentIds];
-        if (selectedDocIds.length === 0 && currentConv?.selectedDocumentIds) {
-          selectedDocIds = [...currentConv.selectedDocumentIds];
-        }
-
-        set((state) => {
-          const conv = state.conversations[activeId!];
-          isFirstMessage = conv.messages.filter((m) => m.role === "user").length === 0;
-          nextTitle = isFirstMessage ? titleFromQuery(trimmedQuery) : conv.title;
-          const nextOrder = [activeId!, ...state.order.filter((x) => x !== activeId!)];
-
-          return {
-            isStreaming: true,
-            order: nextOrder,
-            conversations: {
-              ...state.conversations,
-              [activeId!]: {
-                ...conv,
-                title: nextTitle,
-                selectedDocumentIds: selectedDocIds.length > 0 ? selectedDocIds : conv.selectedDocumentIds,
-                messages: [...conv.messages, userMsg, assistantMsg],
-                updatedAt: Date.now(),
-              },
-            },
-          };
-        });
-
-        // 4. Start streaming via SSE
-        activeAbortController = new AbortController();
-
         let accumulatedContent = "";
-        let sources: Source[] = [];
+
+        // Cập nhật tin nhắn trợ lý (bỏ qua nếu cuộc trò chuyện đã bị xóa)
+        const updateAssistant = (patch: Partial<ChatMessage>) => {
+          set((state) => {
+            const conv = state.conversations[conversationId];
+            if (!conv) return {};
+            return {
+              conversations: {
+                ...state.conversations,
+                [conversationId]: {
+                  ...conv,
+                  messages: conv.messages.map((m) =>
+                    m.id === assistantMsgId ? { ...m, ...patch } : m
+                  ),
+                  updatedAt: Date.now(),
+                },
+              },
+            };
+          });
+        };
 
         try {
+          // 1. Ghi tin nhắn người dùng TRƯỚC khi upload,
+          //    để cuộc trò chuyện không còn trống và không bị dọn mất
+          if (trimmedQuery) {
+            set((state) => {
+              const conv = state.conversations[conversationId];
+              if (!conv) return {};
+
+              isFirstMessage = !conv.messages.some((m) => m.role === "user");
+              nextTitle = isFirstMessage ? titleFromQuery(trimmedQuery) : conv.title;
+
+              const userMsg: ChatMessage = {
+                id: userMsgId,
+                role: "user",
+                content: trimmedQuery,
+                sources: [],
+                status: "done",
+                createdAt: Date.now(),
+              };
+
+              const assistantMsg: ChatMessage = {
+                id: assistantMsgId,
+                role: "assistant",
+                content: "",
+                sources: [],
+                status: "streaming",
+                createdAt: Date.now(),
+              };
+
+              return {
+                activeId: conversationId,
+                order: [conversationId, ...state.order.filter((x) => x !== conversationId)],
+                conversations: {
+                  ...state.conversations,
+                  [conversationId]: {
+                    ...conv,
+                    title: nextTitle,
+                    messages: [...conv.messages, userMsg, assistantMsg],
+                    updatedAt: Date.now(),
+                  },
+                },
+              };
+            });
+          }
+
+          // 2. Upload file đính kèm
+          const uploadedDocumentIds: string[] = [];
+
+          if (hasFiles) {
+            try {
+              for (const file of files) {
+                if (controller.signal.aborted) break;
+                const res = await uploadDocumentFile(file);
+                if (res?.document_id) {
+                  uploadedDocumentIds.push(res.document_id);
+                }
+              }
+
+              if (!controller.signal.aborted) {
+                useToastStore
+                  .getState()
+                  .pushToast(`Đã tải lên thành công ${uploadedDocumentIds.length} tài liệu`, "success");
+              }
+            } catch (err: unknown) {
+              const msg = err instanceof Error ? err.message : "Failed to upload attachments";
+              useToastStore.getState().pushToast(msg, "error");
+              if (trimmedQuery) {
+                updateAssistant({ content: msg, status: "error" });
+              }
+              return;
+            }
+          }
+
+          // Chỉ upload, không có câu hỏi
+          if (!trimmedQuery) return;
+
+          // Người dùng bấm Stop trong lúc upload
+          if (controller.signal.aborted) {
+            updateAssistant({ status: "stopped" });
+            return;
+          }
+
+          // 3. Cuộc trò chuyện phải còn tồn tại sau khi upload
+          const conv = get().conversations[conversationId];
+          if (!conv) {
+            useToastStore
+              .getState()
+              .pushToast("Cuộc trò chuyện đã bị đóng trong lúc tải tệp. Vui lòng gửi lại.", "error");
+            return;
+          }
+
+          // 4. Xác định tài liệu được chọn
+          const selectedDocIds =
+            uploadedDocumentIds.length > 0
+              ? uploadedDocumentIds
+              : [...(conv.selectedDocumentIds ?? [])];
+
+          if (uploadedDocumentIds.length > 0) {
+            set((state) => {
+              const c = state.conversations[conversationId];
+              if (!c) return {};
+              return {
+                conversations: {
+                  ...state.conversations,
+                  [conversationId]: {
+                    ...c,
+                    selectedDocumentIds: selectedDocIds,
+                  },
+                },
+              };
+            });
+          }
+
+          // 5. Gọi chat và nhận stream
           const { activeMainSkillId, activeModifierSkillIds } = useSkillStore.getState();
+
           const stream = streamChat(
             {
               query: trimmedQuery,
               top_k: 5,
               temperature: 0.7,
               stream: true,
-              conversation_id: activeId,
+              conversation_id: conversationId,
               skill_id: activeMainSkillId,
               modifier_skill_ids: activeModifierSkillIds,
               selected_document_ids: selectedDocIds,
             },
-            activeAbortController.signal
+            controller.signal
           );
 
           for await (const event of stream) {
             if (event.type === "sources") {
-              sources = event.data;
-              set((state) => {
-                const conv = state.conversations[activeId!];
-                if (!conv) return state;
-                return {
-                  conversations: {
-                    ...state.conversations,
-                    [activeId!]: {
-                      ...conv,
-                      messages: conv.messages.map((m) =>
-                        m.id === assistantMsgId ? { ...m, sources } : m
-                      ),
-                      updatedAt: Date.now(),
-                    },
-                  },
-                };
-              });
+              updateAssistant({ sources: event.data });
             } else if (event.type === "token") {
               accumulatedContent += event.data;
-              set((state) => {
-                const conv = state.conversations[activeId!];
-                if (!conv) return state;
-                return {
-                  conversations: {
-                    ...state.conversations,
-                    [activeId!]: {
-                      ...conv,
-                      messages: conv.messages.map((m) =>
-                        m.id === assistantMsgId ? { ...m, content: accumulatedContent } : m
-                      ),
-                      updatedAt: Date.now(),
-                    },
-                  },
-                };
-              });
+              updateAssistant({ content: accumulatedContent });
             } else if (event.type === "error") {
-              set((state) => {
-                const conv = state.conversations[activeId!];
-                if (!conv) return state;
-                return {
-                  conversations: {
-                    ...state.conversations,
-                    [activeId!]: {
-                      ...conv,
-                      messages: conv.messages.map((m) =>
-                        m.id === assistantMsgId
-                          ? {
-                              ...m,
-                              content: accumulatedContent || event.data || "An error occurred while generating.",
-                              status: "error",
-                            }
-                          : m
-                      ),
-                      updatedAt: Date.now(),
-                    },
-                  },
-                };
+              updateAssistant({
+                content: accumulatedContent || event.data || "An error occurred while generating.",
+                status: "error",
               });
             } else if (event.type === "done") {
-              set((state) => {
-                const conv = state.conversations[activeId!];
-                if (!conv) return state;
-                return {
-                  conversations: {
-                    ...state.conversations,
-                    [activeId!]: {
-                      ...conv,
-                      messages: conv.messages.map((m) =>
-                        m.id === assistantMsgId
-                          ? {
-                              ...m,
-                              content: accumulatedContent || "No response received. Please try again.",
-                              status: "done",
-                            }
-                          : m
-                      ),
-                      updatedAt: Date.now(),
-                    },
-                  },
-                };
+              updateAssistant({
+                content: accumulatedContent || "No response received. Please try again.",
+                status: "done",
               });
 
-              // If first message in chat, sync title to backend
               if (isFirstMessage && nextTitle && nextTitle !== "New chat") {
-                renameConversationApi(activeId, nextTitle).catch(() => {});
+                renameConversationApi(conversationId, nextTitle).catch(() => {});
               }
             }
           }
         } catch (err: unknown) {
-          if (activeAbortController?.signal.aborted) {
-            set((state) => {
-              const conv = state.conversations[activeId!];
-              if (!conv) return state;
-              return {
-                conversations: {
-                  ...state.conversations,
-                  [activeId!]: {
-                    ...conv,
-                    messages: conv.messages.map((m) =>
-                      m.id === assistantMsgId ? { ...m, status: "stopped" } : m
-                    ),
-                    updatedAt: Date.now(),
-                  },
-                },
-              };
-            });
+          if (controller.signal.aborted) {
+            updateAssistant({ status: "stopped" });
           } else {
             const errText = err instanceof Error ? err.message : "Failed to connect to assistant";
-            set((state) => {
-              const conv = state.conversations[activeId!];
-              if (!conv) return state;
-              return {
-                conversations: {
-                  ...state.conversations,
-                  [activeId!]: {
-                    ...conv,
-                    messages: conv.messages.map((m) =>
-                      m.id === assistantMsgId
-                        ? {
-                            ...m,
-                            content: accumulatedContent || errText,
-                            status: "error",
-                          }
-                        : m
-                    ),
-                    updatedAt: Date.now(),
-                  },
-                },
-              };
+            updateAssistant({
+              content: accumulatedContent || errText,
+              status: "error",
             });
           }
         } finally {
-          activeAbortController = null;
+          // Luôn chạy, kể cả khi return sớm hoặc gặp lỗi
+          if (activeAbortController === controller) {
+            activeAbortController = null;
+          }
           set({ isStreaming: false });
         }
       },

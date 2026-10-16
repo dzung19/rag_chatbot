@@ -17,8 +17,10 @@ import httpx  # type: ignore[import]
 
 logger = logging.getLogger(__name__)
 
+
 class LLMQueueTimeoutError(TimeoutError):
     pass
+
 
 class OllamaLLMClient:
     """Async client for Ollama LLM inference with concurrency control."""
@@ -197,50 +199,120 @@ class OllamaLLMClient:
         messages: Optional[list[dict]] = None,
         temperature: float = 0.7,
         num_predict: int = 1024,
-    ) -> AsyncGenerator[str, None]:
-        """Generate a streaming response with concurrency limiting, yielding tokens.
+        ) -> AsyncGenerator[str, None]:
+            async with self.acquire_slot():
+                client = await self._get_client()
+                chat_messages = self._prepare_messages(
+                    prompt=prompt,
+                    messages=messages,
+                )
+                options = self._build_options(
+                    temperature=temperature,
+                    num_predict=num_predict,
+                )
 
-        Args:
-            prompt: Full prompt string (fallback if messages not supplied).
-            messages: List of message dicts with role and content keys.
-            temperature: Sampling temperature.
-            num_predict: Maximum tokens to generate.
+                content_chars = 0
+                thinking_chars = 0
+                frame_count = 0
+                received_done = False
 
-        Yields:
-            Individual tokens as they are generated.
-        """
-        async with self.acquire_slot():
-            client = await self._get_client()
-            chat_messages = self._prepare_messages(prompt=prompt, messages=messages)
-            options = self._build_options(
-                temperature=temperature,
-                num_predict=num_predict,
-            )
+                logger.info(
+                    "Ollama stream start: model=%s num_predict=%d",
+                    self.model,
+                    num_predict,
+                )
 
-            async with client.stream(
-                "POST",
-                f"{self.ollama_host}/api/chat",
-                json={
-                    "model": self.model,
-                    "messages": chat_messages,
-                    "stream": True,
-                    "options": options,
-                },
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                        content = data.get("message", {}).get("content", "")
+                async with client.stream(
+                    "POST",
+                    f"{self.ollama_host}/api/chat",
+                    json={
+                        "model": self.model,
+                        "messages": chat_messages,
+                        "think": False,
+                        "stream": True,
+                        "options": options,
+                    },
+                ) as response:
+                    response.raise_for_status()
+
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+
+                        try:
+                            data = json.loads(line)
+                        except json.JSONDecodeError as error:
+                            raise RuntimeError(
+                                "Ollama returned an invalid JSON stream frame."
+                            ) from error
+
+                        if not isinstance(data, dict):
+                            raise RuntimeError(
+                                "Ollama returned an unexpected stream frame."
+                            )
+
+                        frame_count += 1
+
+                        if data.get("error"):
+                            # Không ghi nguyên error payload vào log.
+                            logger.error(
+                                "Ollama returned an error frame: model=%s",
+                                self.model,
+                            )
+                            raise RuntimeError(
+                                "Ollama reported an error during generation."
+                            )
+
+                        message = data.get("message") or {}
+                        if not isinstance(message, dict):
+                            raise RuntimeError(
+                                "Ollama returned an invalid message."
+                            )
+
+                        content = message.get("content") or ""
+                        thinking = message.get("thinking") or ""
+
+                        if not isinstance(content, str):
+                            raise RuntimeError(
+                                "Ollama returned non-text content."
+                            )
+
+                        if isinstance(thinking, str):
+                            thinking_chars += len(thinking)
+
                         if content:
+                            if content_chars == 0:
+                                logger.info(
+                                    "Ollama first content received."
+                                )
+                            content_chars += len(content)
                             yield content
-                        if data.get("done", False):
-                            logger.debug("Ollama stream completed.")
+
+                        if data.get("done"):
+                            received_done = True
+                            logger.info(
+                                "Ollama stream completed: frames=%d "
+                                "content_chars=%d thinking_chars=%d "
+                                "done_reason=%s prompt_tokens=%s "
+                                "output_tokens=%s",
+                                frame_count,
+                                content_chars,
+                                thinking_chars,
+                                data.get("done_reason"),
+                                data.get("prompt_eval_count"),
+                                data.get("eval_count"),
+                            )
                             break
-                    except json.JSONDecodeError:
-                        continue
+
+                if not received_done:
+                    raise RuntimeError(
+                        "Ollama stream ended without a completion frame."
+                    )
+
+                if content_chars == 0:
+                    raise RuntimeError(
+                        "Ollama completed without answer content."
+                    )
 
     async def health_check(self) -> bool:
         """Check if Ollama is reachable and model is loaded."""

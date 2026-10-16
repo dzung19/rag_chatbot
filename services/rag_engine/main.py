@@ -329,13 +329,13 @@ async def query_stream(request: ChatRequest):
             main_skill = None
             if request.skill_id:
                 main_skill = skills_repo.get_skill(request.skill_id)
-                
+
             modifier_skills = []
             for mod_id in request.modifier_skill_ids:
                 mod = skills_repo.get_skill(mod_id)
                 if mod:
                     modifier_skills.append(mod)
-                    
+
             # Apply overrides
             top_k = request.top_k
             temperature = request.temperature
@@ -401,6 +401,11 @@ async def query_stream(request: ChatRequest):
             ]
             yield {"event": "sources", "data": json.dumps(sources)}
 
+            logger.info(
+                "COMPARE step=load_documents_done docs=%d chars=%s",
+                len(results),
+                [len(item.get("text") or "") for item in results],
+            )
             # 2. Build structured messages with budgeting
             messages = build_rag_messages(
                 query=request.query,
@@ -410,16 +415,55 @@ async def query_stream(request: ChatRequest):
             )
 
             # 3. Stream LLM response through the arrow cleaner
+                        # 3. Stream LLM response through the arrow cleaner
             llm = _get_llm_client()
+            output_chars = 0
+            output_events = 0
+
             async with aclosing(
                 llm.generate_stream(
                     messages=messages,
-                    temperature=request.temperature,
+                    temperature=temperature,
+                    num_predict=(
+                    2048
+                    if request.skill_id == "business-compare"
+                    else 1024
+                    )
                 )
             ) as token_gen:
-                async with aclosing(_clean_stream_tokens(token_gen)) as cleaned:
+                async with aclosing(
+                    _clean_stream_tokens(token_gen)
+                ) as cleaned:
                     async for token in cleaned:
-                        yield {"event": "token", "data": json.dumps(token)}
+                        if not token:
+                            continue
+
+                        if output_events == 0:
+                            logger.info(
+                                "RAG first token event emitted."
+                            )
+
+                        output_events += 1
+                        output_chars += len(token)
+
+                        yield {
+                            "event": "token",
+                            "data": json.dumps(
+                                token,
+                                ensure_ascii=False,
+                            ),
+                        }
+
+            logger.info(
+                "RAG stream finished: events=%d chars=%d",
+                output_events,
+                output_chars,
+            )
+
+            if output_chars == 0:
+                raise RuntimeError(
+                    "No answer content remained after stream cleaning."
+                )
 
             yield {"event": "done", "data": ""}
 
@@ -429,12 +473,10 @@ async def query_stream(request: ChatRequest):
                 "event": "error",
                 "data": "Hệ thống đang quá tải (hàng đợi xử lý LLM đã hết thời gian chờ). Vui lòng thử lại sau giây lát.",
             }
-            yield {"event": "done", "data": ""}
 
         except Exception as e:
             logger.error("Streaming query failed: %s", str(e), exc_info=True)
             yield {"event": "error", "data": f"Lỗi xử lý phản hồi: {str(e)}"}
-            yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
 
