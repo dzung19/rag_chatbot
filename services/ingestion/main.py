@@ -349,6 +349,13 @@ async def _process_document(
                 file_type=doc_type.value,
             )
             await asyncio.to_thread(
+                store.save_document_chunks,
+                document_id=document_id,
+                filename=original_filename,
+                chunks=chunks,
+                embedding_model=settings.ollama_embed_model,
+            )
+            await asyncio.to_thread(
                 save_document_full_and_chunks,
                 document_id=document_id,
                 filename=original_filename,
@@ -677,6 +684,15 @@ async def upload_document(
             filename=doc_info.filename,
             status=doc_info.status,
         )
+
+    # 5.1 Save chunks into PostgreSQL document_chunks (requires parent row in ingestion_documents)
+    await asyncio.to_thread(
+        store.save_document_chunks,
+        document_id=document_id,
+        filename=file.filename,
+        chunks=chunks,
+        embedding_model=settings.ollama_embed_model,
+    )
 
     await asyncio.to_thread(
         store.update_progress,

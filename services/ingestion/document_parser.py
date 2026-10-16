@@ -40,17 +40,11 @@ def parse_document(file_path: str, file_type: str) -> Generator[str, None, None]
 
 
 def _parse_pdf(file_path: str) -> Generator[str, None, None]:
-    """Parse PDF using PyMuPDF (fitz). Yields text per page."""
-    import fitz  # PyMuPDF
-
+    """Parse PDF using layout-aware & box-grouping PDF parser. Yields structured text per page."""
     try:
-        doc = fitz.open(file_path)
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            text = page.get_text("text")
-            if text and text.strip():
-                yield text.strip()
-        doc.close()
+        from pdf_parser import parse_pdf_document
+
+        yield from parse_pdf_document(file_path)
     except Exception as e:
         logger.error("Failed to parse PDF %s: %s", file_path, str(e))
         raise

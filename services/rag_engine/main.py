@@ -253,7 +253,16 @@ async def query_sync(
                     processing_time_ms=round((time.perf_counter() - start_time) * 1000, 1),
                 )
         else:
-            results = await retriever.search(request.query, top_k=top_k)
+            where_filter = (
+                {"document_ids": request.selected_document_ids}
+                if request.selected_document_ids
+                else None
+            )
+            results = await retriever.search(
+                request.query,
+                top_k=top_k,
+                where_filter=where_filter,
+            )
 
         if not results:
             logger.info("No relevant context found for query: %s", request.query[:100])
@@ -384,7 +393,16 @@ async def query_stream(request: ChatRequest):
                     yield {"event": "done", "data": json.dumps({"query": request.query, "total_chunks": 0})}
                     return
             else:
-                results = await retriever.search(request.query, top_k=top_k)
+                where_filter = (
+                    {"document_ids": request.selected_document_ids}
+                    if request.selected_document_ids
+                    else None
+                )
+                results = await retriever.search(
+                    request.query,
+                    top_k=top_k,
+                    where_filter=where_filter,
+                )
 
             # Send enriched sources first
             sources = [
