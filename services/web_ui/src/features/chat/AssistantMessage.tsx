@@ -9,13 +9,16 @@ import { ThinkingShimmer } from "./ThinkingShimmer";
 interface AssistantMessageProps {
   conversationId: string;
   message: ChatMessage;
+  isStreaming?: boolean;
 }
 
 export const AssistantMessage: React.FC<AssistantMessageProps> = ({
   conversationId,
   message,
+  isStreaming = false,
 }) => {
-  const isThinking = message.status === "streaming" && !message.content;
+  const isActivelyStreaming = isStreaming && message.status === "streaming";
+  const isThinking = isActivelyStreaming && !message.content;
 
   return (
     <div
@@ -50,10 +53,25 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
           <ThinkingShimmer />
         ) : (
           <>
-            <MarkdownContent content={message.content} />
+            {message.content ? (
+              <MarkdownContent content={message.content} />
+            ) : (
+              !isActivelyStreaming &&
+              message.status !== "error" && (
+                <div
+                  style={{
+                    fontSize: "var(--text-xs)",
+                    color: "var(--text-muted)",
+                    fontStyle: "italic",
+                  }}
+                >
+                  (Không có phản hồi được lưu cho lượt hội thoại này)
+                </div>
+              )
+            )}
 
             {/* Blinking cursor while streaming */}
-            {message.status === "streaming" && (
+            {isActivelyStreaming && (
               <span
                 style={{
                   display: "inline-block",
@@ -68,7 +86,7 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
             )}
 
             {/* Stopped notice */}
-            {message.status === "stopped" && (
+            {!isActivelyStreaming && message.status === "stopped" && message.content && (
               <div
                 style={{
                   fontSize: "var(--text-xs)",
@@ -98,7 +116,7 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
             <SourceCards sources={message.sources} />
 
             {/* Message Action icons (copy, regenerate, vote) */}
-            {message.status !== "streaming" && (
+            {!isActivelyStreaming && (
               <MessageActions
                 conversationId={conversationId}
                 messageId={message.id}

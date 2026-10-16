@@ -64,7 +64,7 @@ function mapStoredMessageToChatMessage(msg: ApiStoredMessage): ChatMessage {
 
   let status: MessageStatus = "done";
   if (msg.status === "generating" || msg.status === "streaming") {
-    status = "streaming";
+    status = msg.content && msg.content.trim().length > 0 ? "done" : "stopped";
   } else if (msg.status === "failed") {
     status = "error";
   } else if (msg.status === "cancelled") {
@@ -234,10 +234,41 @@ export const useChatStore = create<ChatState>()(
 
         try {
           const detail = await fetchConversation(id);
-          const messages = (detail.messages || []).map(mapStoredMessageToChatMessage);
+          const rawMessages = (detail.messages || []).map(mapStoredMessageToChatMessage);
 
           set((s) => {
+            // Avoid clobbering active streaming conversation if streaming started while fetching
+            if (s.isStreaming && s.activeId === id) {
+              return s;
+            }
+
             const prev = s.conversations[id];
+            const prevMsgs = prev?.messages || [];
+            const messages = rawMessages.map((m, idx) => {
+              if (m.role === "assistant" && !m.content.trim()) {
+                const localCandidate = prevMsgs[idx];
+                if (
+                  localCandidate &&
+                  localCandidate.role === "assistant" &&
+                  localCandidate.content.trim().length > 0
+                ) {
+                  return {
+                    ...m,
+                    content: localCandidate.content,
+                    sources:
+                      localCandidate.sources && localCandidate.sources.length > 0
+                        ? localCandidate.sources
+                        : m.sources,
+                    status:
+                      localCandidate.status === "streaming"
+                        ? "done"
+                        : localCandidate.status,
+                  };
+                }
+              }
+              return m;
+            });
+
             const updatedConv: Conversation = {
               id: detail.id,
               title: detail.title || prev?.title || "New chat",
@@ -528,11 +559,52 @@ export const useChatStore = create<ChatState>()(
             });
           }
         } finally {
-          // Luôn chạy, kể cả khi return sớm hoặc gặp lỗi
+          // Luôn chạy, kể cả khi return sớm hoặc gặp lỗi:
+          // Đảm bảo không bao giờ để sót message ở trạng thái "streaming" khi isStreaming = false
           if (activeAbortController === controller) {
             activeAbortController = null;
           }
-          set({ isStreaming: false });
+          set((state) => {
+            const conv = state.conversations[conversationId];
+            if (!conv) {
+              return { isStreaming: false };
+            }
+            const hasStuckStreaming = conv.messages.some(
+              (m) => m.id === assistantMsgId && m.status === "streaming"
+            );
+            if (!hasStuckStreaming) {
+              return { isStreaming: false };
+            }
+            const fallbackStatus: MessageStatus = controller.signal.aborted
+              ? "stopped"
+              : accumulatedContent.trim().length > 0
+              ? "done"
+              : "error";
+            return {
+              isStreaming: false,
+              conversations: {
+                ...state.conversations,
+                [conversationId]: {
+                  ...conv,
+                  messages: conv.messages.map((m) =>
+                    m.id === assistantMsgId && m.status === "streaming"
+                      ? {
+                          ...m,
+                          content:
+                            m.content ||
+                            accumulatedContent ||
+                            (fallbackStatus === "error"
+                              ? "No response received. Please try again."
+                              : ""),
+                          status: fallbackStatus,
+                        }
+                      : m
+                  ),
+                  updatedAt: Date.now(),
+                },
+              },
+            };
+          });
         }
       },
 
@@ -541,7 +613,27 @@ export const useChatStore = create<ChatState>()(
           activeAbortController.abort();
           activeAbortController = null;
         }
-        set({ isStreaming: false });
+        set((state) => {
+          const currentId = state.activeId;
+          const conv = currentId ? state.conversations[currentId] : null;
+          if (!currentId || !conv) {
+            return { isStreaming: false };
+          }
+          return {
+            isStreaming: false,
+            conversations: {
+              ...state.conversations,
+              [currentId]: {
+                ...conv,
+                messages: conv.messages.map((m) =>
+                  m.status === "streaming"
+                    ? { ...m, status: m.content.trim().length > 0 ? "done" : "stopped" }
+                    : m
+                ),
+              },
+            },
+          };
+        });
       },
 
       regenerate: async (messageId?: string) => {

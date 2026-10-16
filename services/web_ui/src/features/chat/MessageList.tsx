@@ -52,7 +52,7 @@ export const MessageList: React.FC<MessageListProps> = ({
       onScroll={handleScroll}
     >
       <div className={styles.messagesInner}>
-        {messages.map((message) =>
+        {messages.map((message, index) =>
           message.role === "user" ? (
             <UserMessage key={message.id} message={message} />
           ) : (
@@ -60,6 +60,7 @@ export const MessageList: React.FC<MessageListProps> = ({
               key={message.id}
               conversationId={conversationId}
               message={message}
+              isStreaming={isStreaming && index === messages.length - 1}
             />
           )
         )}

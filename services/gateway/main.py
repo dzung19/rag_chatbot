@@ -261,11 +261,14 @@ async def chat_stream(
         assistant_parts: list[str] = []
         sources: list[dict] = []
         received_done = False
+        turn_finalized = False
         
         async def fail_turn(partial_content: str) -> None:
-            if not turn_id or not assistant_msg_id:
+            nonlocal turn_finalized
+            if turn_finalized or not turn_id or not assistant_msg_id:
                 return
 
+            turn_finalized = True
             try:
                 fail_resp = await client.post(
                     f"{settings.conversation_service_url}/internal/turns/{turn_id}/fail",
@@ -282,7 +285,7 @@ async def chat_stream(
                 logger.warning("Unable to mark chat turn as failed: %s", str(error))
         
         async def handle_event(event: SSEEvent) -> None:
-            nonlocal sources, received_done
+            nonlocal sources, received_done, turn_finalized
 
             if event.event == "token":
                 # Giống client: nếu data không phải JSON string thì dùng raw text.
@@ -296,6 +299,13 @@ async def chat_stream(
                     sources = [
                         item for item in event.data if isinstance(item, dict)
                     ]
+
+            elif event.event == "error":
+                err_msg = (
+                    event.data if isinstance(event.data, str) else event.raw_data
+                )
+                partial = "".join(assistant_parts) or (err_msg or "")
+                await fail_turn(partial)
 
             elif event.event == "done":
                 received_done = True
@@ -312,9 +322,10 @@ async def chat_stream(
 
                 if not assistant_content.strip():
                     logger.warning(
-                        "Skip complete because assistant content is empty. turn_id=%s",
+                        "Skip complete because assistant content is empty; marking turn failed. turn_id=%s",
                         turn_id,
                     )
+                    await fail_turn("")
                     return
 
                 try:
@@ -332,6 +343,7 @@ async def chat_stream(
                         timeout=5.0,
                     )
                     complete_response.raise_for_status()
+                    turn_finalized = True
                 except httpx.HTTPError as error:
                     logger.warning(
                         "Unable to complete chat history: %s", str(error)
@@ -355,6 +367,9 @@ async def chat_stream(
             logger.error("Chat stream error: %s", str(e))
             await fail_turn("".join(assistant_parts))
             raise
+        finally:
+            if not turn_finalized:
+                await fail_turn("".join(assistant_parts))
 
     return StreamingResponse(
         proxy_stream(),
