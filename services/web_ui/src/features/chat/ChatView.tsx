@@ -9,13 +9,14 @@ import { Composer } from "./Composer";
 export const ChatView: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { conversations, activeId, selectConversation, resetActive, isStreaming } =
+  const { conversations, selectConversation, resetActive, isStreaming } =
     useChatStore();
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (!id) {
-      if (activeId !== null) {
+      setLoading(false);
+      if (useChatStore.getState().activeId !== null) {
         resetActive();
       }
       return;
@@ -40,7 +41,7 @@ export const ChatView: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, [id, selectConversation, resetActive, navigate, activeId]);
+  }, [id, selectConversation, resetActive, navigate]);
 
   const currentConv = id ? conversations[id] : null;
   const hasMessages = currentConv && currentConv.messages && currentConv.messages.length > 0;
@@ -55,7 +56,7 @@ export const ChatView: React.FC = () => {
         overflow: "hidden",
       }}
     >
-      {loading && !currentConv ? (
+      {Boolean(id) && loading && !currentConv ? (
         <div
           style={{
             flex: 1,

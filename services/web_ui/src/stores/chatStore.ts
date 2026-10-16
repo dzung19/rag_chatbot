@@ -219,13 +219,11 @@ export const useChatStore = create<ChatState>()(
           }
         }
 
-        if (nextConvs[id]) {
-          set({
-            conversations: nextConvs,
-            order: nextOrder,
-            activeId: id,
-          });
-        }
+        set({
+          conversations: nextConvs,
+          order: nextOrder,
+          activeId: id,
+        });
 
         // Avoid overwriting conversation state if currently streaming this conversation
         if (get().isStreaming && get().activeId === id) {
@@ -258,7 +256,7 @@ export const useChatStore = create<ChatState>()(
                 [id]: updatedConv,
               },
               order: updatedOrder,
-              activeId: id,
+              activeId: s.activeId === id ? id : s.activeId,
             };
           });
         } catch (err: unknown) {
