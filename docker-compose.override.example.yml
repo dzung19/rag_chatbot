@@ -1,0 +1,15 @@
+# =============================================================================
+# Docker Compose Override for NVIDIA GPU Acceleration
+# Copy this file to `docker-compose.override.yml` on machines with NVIDIA GPU.
+# Docker Compose automatically merges this file without modifying docker-compose.yml.
+# =============================================================================
+
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

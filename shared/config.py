@@ -73,11 +73,12 @@ class Settings(BaseSettings):
 
     # --- LLM ---
     ollama_host: str = Field(default="http://ollama:11434")
-    ollama_model: str = Field(default="gemma4:e2b")
+    ollama_model: str = Field(default="gemma4:latest")
     ollama_embed_model: str = Field(default="nomic-embed-text")
     ollama_timeout: int = Field(default=300, description="LLM request timeout in seconds")
     ollama_num_threads: int | None = Field(default=None, description="Number of CPU threads for Ollama inference")
     ollama_num_predict: int = Field(default=1024, description="Max output tokens per response")
+    ollama_num_ctx: int = Field(default=8192, description="Context window size for Ollama inference")
     llm_max_concurrency: int = Field(default=3, ge=1, le=50, description="Max concurrent LLM generation requests")
     llm_queue_timeout: int = Field(default=120, ge=5, le=600, description="Max seconds to wait in LLM queue before timeout")
 

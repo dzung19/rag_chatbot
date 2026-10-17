@@ -82,6 +82,7 @@ def _get_llm_client() -> OllamaLLMClient:
             num_threads=settings.ollama_num_threads,
             max_concurrency=settings.llm_max_concurrency,
             queue_timeout=settings.llm_queue_timeout,
+            num_ctx=settings.ollama_num_ctx,
         )
     return _llm_client
 
@@ -280,6 +281,7 @@ async def query_sync(
         raw_answer = await llm.generate(
             messages=messages,
             temperature=temperature,
+            num_ctx=16384 if request.skill_id == "business-compare" else None,
         )
 
         # Post-process to clean LaTeX math arrows to simple Unicode arrows
@@ -443,10 +445,15 @@ async def query_stream(request: ChatRequest):
                     messages=messages,
                     temperature=temperature,
                     num_predict=(
-                    2048
-                    if request.skill_id == "business-compare"
-                    else 1024
-                    )
+                        2048
+                        if request.skill_id == "business-compare"
+                        else 1024
+                    ),
+                    num_ctx=(
+                        16384
+                        if request.skill_id == "business-compare"
+                        else None
+                    ),
                 )
             ) as token_gen:
                 async with aclosing(
