@@ -20,6 +20,12 @@ env/
 data/
 uploaded_docs/
 chroma_data/
+*.db
+*.sqlite
+*.sqlite3
+shared_data/*.db
+shared_data/*.sqlite
+shared_data/*.sqlite3
 
 # Logging data (Docker volumes)
 loki_data/
@@ -40,3 +46,5 @@ desktop.ini
 # Docker
 *.log
 qdrant_storage/
+docker-compose.override.yml
+!docker-compose.override.example.yml
