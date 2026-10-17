@@ -77,7 +77,7 @@ export const ChatView: React.FC = () => {
             flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
-            paddingBottom: "130px",
+            padding: "1rem",
             overflowY: "auto",
           }}
         >

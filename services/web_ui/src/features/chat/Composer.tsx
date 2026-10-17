@@ -124,38 +124,32 @@ export const Composer: React.FC = () => {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-        <SkillSelector />
-
-        {activeMainSkillId === "business-compare" && (
-          <div
-            className={`${styles.compareNotice} ${
-              !hasValidFilesForCompare ? styles.invalid : ""
-            }`}
-            onClick={() => setShowCompareDialog(true)}
-            role="button"
-            tabIndex={0}
-            title="Nhấn để xem chi tiết yêu cầu tài liệu so sánh"
-          >
-            <GitCompare size={14} />
-            <span>
-              {attachedFiles.length === 2
-                ? "So sánh Nghiệp vụ: Đã đính kèm 2 file"
-                : conversationHas2Files
-                ? "So sánh Nghiệp vụ: Đang đối chiếu 2 file trong hội thoại"
-                : `So sánh Nghiệp vụ: Cần chính xác 2 file (${attachedFiles.length}/2)`}
-            </span>
-            {!hasValidFilesForCompare ? (
-              <span className={styles.noticeAlert}>Chưa đủ 2 file</span>
-            ) : (
-              <span
-                className={styles.noticeAlert}
-                style={{ color: "var(--badge-green-text)" }}
-              >
-                ✓ Hợp lệ (Bypass RAG)
+        <SkillSelector>
+          {activeMainSkillId === "business-compare" && (
+            <button
+              type="button"
+              className={`${styles.compareInlineBadge} ${
+                !hasValidFilesForCompare ? styles.invalid : styles.valid
+              }`}
+              onClick={() => setShowCompareDialog(true)}
+              title="Nhấn để xem chi tiết yêu cầu tài liệu so sánh"
+            >
+              <GitCompare size={13} />
+              <span>
+                {attachedFiles.length === 2
+                  ? "Đã chọn 2 file"
+                  : conversationHas2Files
+                  ? "2 file trong chat"
+                  : `Cần 2 file (${attachedFiles.length}/2)`}
               </span>
-            )}
-          </div>
-        )}
+              {!hasValidFilesForCompare ? (
+                <span className={styles.inlineBadgeAlert}>Chưa đủ 2 file</span>
+              ) : (
+                <span className={styles.inlineBadgeAlert}>✓ Sẵn sàng</span>
+              )}
+            </button>
+          )}
+        </SkillSelector>
 
         <AttachmentChips files={attachedFiles} onRemove={handleRemoveFile} />
 
@@ -183,7 +177,11 @@ export const Composer: React.FC = () => {
             ref={textareaRef}
             className={styles.textarea}
             rows={1}
-            placeholder="Ask about your documents..."
+            placeholder={
+              activeMainSkillId === "business-compare" && !hasValidFilesForCompare
+                ? "Đính kèm 2 file (BL & Check List) để bắt đầu so sánh..."
+                : "Ask about your documents..."
+            }
             value={input}
             maxLength={MAX_INPUT_CHARS}
             onChange={(e) => setInput(e.target.value)}

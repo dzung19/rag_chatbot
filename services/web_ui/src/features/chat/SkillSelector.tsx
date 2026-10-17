@@ -7,7 +7,11 @@ const iconMap: Record<string, React.FC<any>> = {
   Bot, FileText, ShieldCheck, Mail, Scale, Wrench, Languages, Zap, Quote, Sparkles, GitCompare
 };
 
-export const SkillSelector: React.FC = () => {
+export interface SkillSelectorProps {
+  children?: React.ReactNode;
+}
+
+export const SkillSelector: React.FC<SkillSelectorProps> = ({ children }) => {
   const {
     skills,
     isLoading,
@@ -93,6 +97,8 @@ export const SkillSelector: React.FC = () => {
           </div>
         )}
       </div>
+
+      {children}
 
       {/* Modifier Skills Toggles */}
       <div className={styles.modifierList}>

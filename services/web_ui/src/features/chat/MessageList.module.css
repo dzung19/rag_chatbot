@@ -1,7 +1,8 @@
 .scrollArea {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 1.5rem 1rem 140px; /* bottom padding so composer doesn't overlay messages */
+  padding: 1.5rem 1rem 1rem;
   display: flex;
   flex-direction: column;
   position: relative;
@@ -17,9 +18,9 @@
 }
 
 .scrollBottomBtn {
-  position: fixed;
-  bottom: 95px;
-  left: 55%;
+  position: absolute;
+  bottom: 1rem;
+  left: 50%;
   transform: translateX(-50%);
   width: 36px;
   height: 36px;
