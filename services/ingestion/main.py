@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+import httpx
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 import hmac
 from orphan_cleanup import run_orphan_cleanup
@@ -203,6 +204,37 @@ async def _ensure_not_cancelled(document_id: str) -> None:
     if is_cancelled:
         raise DocumentCancelledError(document_id)
 
+
+async def _notify_gateway(
+    document_id: str,
+    filename: str,
+    status: str,
+    chunks_count: int = 0,
+    error: str | None = None,
+) -> None:
+    """Notify API gateway via internal endpoint when document ingestion state changes."""
+    settings = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            headers = {}
+            if settings.internal_service_key:
+                headers["X-Internal-Service-Key"] = settings.internal_service_key
+            response = await client.post(
+                f"{settings.gateway_url.rstrip('/')}/internal/documents/{document_id}/notify",
+                json={
+                    "document_id": document_id,
+                    "filename": filename,
+                    "status": status,
+                    "chunks_count": chunks_count,
+                    "error": error,
+                },
+                headers=headers,
+            )
+            response.raise_for_status()
+            logger.info("Notified gateway of document %s completion (status=%s)", document_id, status)
+    except Exception as err:
+        logger.warning("Failed to notify gateway of document %s: %s", document_id, err)
+
 # ---------------------------------------------------------------------------
 # Background Ingestion Task
 # ---------------------------------------------------------------------------
@@ -373,6 +405,7 @@ async def _process_document(
 
         # 5. Update status
         await asyncio.to_thread(store.mark_completed, document_id, len(chunks))
+        await _notify_gateway(document_id, original_filename, "completed", chunks_count=len(chunks))
 
         logger.info(
             "Document %s ingested successfully: %d chunks stored",
@@ -382,6 +415,7 @@ async def _process_document(
 
     except DocumentCancelledError:
         logger.info("Ingestion cancelled because document was deleted: %s", document_id)
+        await _notify_gateway(document_id, original_filename, "cancelled")
         # Dọn những gì đã ghi sau khi endpoint delete chạy
         try:
             await asyncio.to_thread(
@@ -423,6 +457,7 @@ async def _process_document(
             )
 
         await asyncio.to_thread(store.mark_failed, document_id, str(e))
+        await _notify_gateway(document_id, original_filename, "failed", error=str(e))
 
 
 def _backfill_from_qdrant() -> None:

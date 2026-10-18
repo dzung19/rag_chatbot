@@ -6,19 +6,19 @@ Central entry point for all client requests. Proxies to downstream services.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
 import json
 import logging
 import os
 import sys
 import uuid
-import json
 import codecs
-import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Annotated
 
+from pydantic import BaseModel
 import httpx
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -803,8 +803,89 @@ async def delete_skill(skill_id: str):
 
 
 # ---------------------------------------------------------------------------
-# Document Endpoints
+# Document Endpoints & Real-time Events
 # ---------------------------------------------------------------------------
+
+
+class DocumentNotifyPayload(BaseModel):
+    document_id: str
+    filename: str
+    status: str
+    chunks_count: int = 0
+    error: str | None = None
+
+
+class DocumentEventBroadcaster:
+    def __init__(self):
+        self._listeners: set[asyncio.Queue] = set()
+        self._lock = asyncio.Lock()
+
+    async def subscribe(self) -> asyncio.Queue:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+        async with self._lock:
+            self._listeners.add(queue)
+        return queue
+
+    async def unsubscribe(self, queue: asyncio.Queue):
+        async with self._lock:
+            self._listeners.discard(queue)
+
+    async def broadcast(self, data: dict):
+        async with self._lock:
+            listeners = list(self._listeners)
+        for queue in listeners:
+            try:
+                queue.put_nowait(data)
+            except asyncio.QueueFull:
+                pass
+
+
+document_broadcaster = DocumentEventBroadcaster()
+
+
+@app.post("/internal/documents/{document_id}/notify")
+async def notify_document_event(
+    document_id: str,
+    payload: DocumentNotifyPayload,
+    x_internal_service_key: Annotated[str | None, Header()] = None,
+):
+    settings = get_settings()
+    if settings.internal_service_key and x_internal_service_key != settings.internal_service_key:
+        raise HTTPException(status_code=403, detail="Invalid internal key.")
+
+    logger.info("Broadcasting document event for %s (%s): %s", document_id, payload.filename, payload.status)
+    await document_broadcaster.broadcast(payload.model_dump())
+    return {"status": "ok"}
+
+
+@app.get("/api/v1/documents/events")
+async def document_events_stream(request: Request):
+    """Server-Sent Events stream for real-time document status updates."""
+    queue = await document_broadcaster.subscribe()
+
+    async def event_generator():
+        try:
+            yield "event: connected\ndata: {}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"event: document_status\ndata: {json.dumps(data)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        finally:
+            await document_broadcaster.unsubscribe(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/v1/documents/upload", dependencies=[Depends(get_current_user)])

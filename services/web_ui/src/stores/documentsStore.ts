@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { DocumentInfo } from "../types/api";
+import type { DocumentInfo, DocumentStatusEventPayload } from "../types/api";
 import type { UploadProgressItem } from "../types/chat";
 import {
   fetchDocuments,
@@ -10,16 +10,9 @@ import {
 } from "../api/endpoints";
 import { useToastStore } from "./toastStore";
 
-const DOCUMENT_POLL_INTERVAL_MS = 5000;
-
-let documentPollTimer: ReturnType<typeof setTimeout> | null = null;
 let documentsFetchInFlight: Promise<void> | null = null;
-
-function hasProcessingDocuments(documents: DocumentInfo[]): boolean {
-  return documents.some((document) =>
-    ["pending", "processing"].includes(document.status),
-  );
-}
+let documentEventSource: EventSource | null = null;
+let eventSourceSubscribers = 0;
 
 interface DocumentsState {
   documents: DocumentInfo[];
@@ -31,8 +24,9 @@ interface DocumentsState {
   uploadFiles: (files: File[]) => Promise<void>;
   deleteDocument: (id: string) => Promise<void>;
   syncSharePoint: () => Promise<void>;
+  initDocumentEvents: () => () => void;
+  handleDocumentStatusUpdate: (payload: DocumentStatusEventPayload) => void;
 }
-
 
 export const useDocumentsStore = create<DocumentsState>()((set, get) => ({
   documents: [],
@@ -40,16 +34,107 @@ export const useDocumentsStore = create<DocumentsState>()((set, get) => ({
   isSyncing: false,
   uploads: [],
 
+  initDocumentEvents: () => {
+    eventSourceSubscribers++;
+
+    if (!documentEventSource) {
+      const es = new EventSource("/api/v1/documents/events");
+      documentEventSource = es;
+
+      es.addEventListener("document_status", (event: MessageEvent) => {
+        try {
+          const payload = JSON.parse(event.data) as DocumentStatusEventPayload;
+          get().handleDocumentStatusUpdate(payload);
+        } catch (err) {
+          console.error("Failed to parse document status event:", err);
+        }
+      });
+
+      es.onerror = (err) => {
+        // EventSource will automatically retry in the background
+        console.debug("Document SSE connection issue, retrying...", err);
+      };
+    }
+
+    return () => {
+      eventSourceSubscribers = Math.max(0, eventSourceSubscribers - 1);
+      if (eventSourceSubscribers === 0 && documentEventSource) {
+        documentEventSource.close();
+        documentEventSource = null;
+      }
+    };
+  },
+
+  handleDocumentStatusUpdate: (payload: DocumentStatusEventPayload) => {
+    const { document_id, filename, status, chunks_count, error } = payload;
+
+    // 1. Update existing document in table state
+    set((state) => {
+      const exists = state.documents.some((d) => d.document_id === document_id);
+      if (exists) {
+        return {
+          documents: state.documents.map((d) =>
+            d.document_id === document_id
+              ? {
+                  ...d,
+                  status: (status === "completed" ? "completed" : status === "failed" ? "failed" : d.status) as DocumentInfo["status"],
+                  chunk_count: typeof chunks_count === "number" ? chunks_count : d.chunk_count,
+                  error_message: error || d.error_message,
+                }
+              : d
+          ),
+        };
+      }
+      return state;
+    });
+
+    // 2. Update progress queue items
+    set((state) => ({
+      uploads: state.uploads.map((u) => {
+        if (u.filename === filename) {
+          if (status === "completed") {
+            return { ...u, status: "done", progress: 100 };
+          }
+          if (status === "failed") {
+            return { ...u, status: "failed", error: error || "Processing failed" };
+          }
+        }
+        return u;
+      }),
+    }));
+
+    // If new document not yet in list or status changed, sync list silently
+    const exists = get().documents.some((d) => d.document_id === document_id);
+    if (!exists) {
+      void get().fetchDocuments(true);
+    }
+
+    // 3. Real-time push notification toast
+    if (status === "completed") {
+      useToastStore
+        .getState()
+        .pushToast(
+          `Tài liệu "${filename}" đã được xử lý thành công (${chunks_count ?? 0} chunks).`,
+          "success"
+        );
+    } else if (status === "failed") {
+      useToastStore
+        .getState()
+        .pushToast(
+          `Xử lý tài liệu "${filename}" thất bại: ${error || "Lỗi không xác định"}`,
+          "error"
+        );
+    } else if (status === "cancelled") {
+      useToastStore
+        .getState()
+        .pushToast(`Quá trình xử lý tài liệu "${filename}" đã bị hủy.`, "info");
+    }
+  },
+
   fetchDocuments: async (silent = false) => {
     // Các nơi gọi đồng thời dùng chung request đang chạy.
     if (documentsFetchInFlight) {
       return documentsFetchInFlight;
-    }
-
-    // Hủy lịch cũ nếu người dùng chủ động tải lại danh sách.
-    if (documentPollTimer !== null) {
-      clearTimeout(documentPollTimer);
-      documentPollTimer = null;
     }
 
     if (!silent) {
@@ -69,8 +154,6 @@ export const useDocumentsStore = create<DocumentsState>()((set, get) => ({
             ? err.message
             : "Failed to load documents";
 
-        // Giữ danh sách hiện tại khi API lỗi.
-        // Không xóa documents: [] như code cũ.
         if (silent) {
           console.warn("Failed to refresh documents:", message);
         } else {
@@ -83,14 +166,6 @@ export const useDocumentsStore = create<DocumentsState>()((set, get) => ({
       }
     })().finally(() => {
       documentsFetchInFlight = null;
-
-      // Chỉ tiếp tục polling khi còn tài liệu đang xử lý.
-      if (hasProcessingDocuments(get().documents)) {
-        documentPollTimer = setTimeout(() => {
-          documentPollTimer = null;
-          void get().fetchDocuments(true);
-        }, DOCUMENT_POLL_INTERVAL_MS);
-      }
     });
 
     return documentsFetchInFlight;
@@ -116,18 +191,13 @@ export const useDocumentsStore = create<DocumentsState>()((set, get) => ({
       // Set uploading
       set((state) => ({
         uploads: state.uploads.map((u) =>
-          u.id === item.id ? { ...u, status: "uploading", progress: 50 } : u
+          u.id === item.id ? { ...u, status: "uploading", progress: 60 } : u
         ),
       }));
 
       try {
         await uploadDocumentFile(file);
-        set((state) => ({
-          uploads: state.uploads.map((u) =>
-            u.id === item.id ? { ...u, status: "done", progress: 100 } : u
-          ),
-        }));
-        useToastStore.getState().pushToast(`Uploaded "${file.name}"`, "success");
+        useToastStore.getState().pushToast(`Đã tải lên "${file.name}", đang xử lý trong nền...`, "info");
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : "Upload failed";
         set((state) => ({
@@ -139,8 +209,8 @@ export const useDocumentsStore = create<DocumentsState>()((set, get) => ({
       }
     }
 
-    // Refresh documents list after batch finishes
-    await get().fetchDocuments();
+    // Refresh documents list after batch upload to show pending/processing state
+    await get().fetchDocuments(true);
   },
 
   deleteDocument: async (documentId: string) => {

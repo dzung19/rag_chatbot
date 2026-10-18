@@ -1,4 +1,12 @@
-export type DocumentStatus = "indexed" | "failed" | "processing" | "pending";
+export type DocumentStatus = "indexed" | "completed" | "failed" | "processing" | "pending";
+
+export interface DocumentStatusEventPayload {
+  document_id: string;
+  filename: string;
+  status: "completed" | "failed" | "cancelled" | "processing" | "pending";
+  chunks_count?: number;
+  error?: string | null;
+}
 
 export interface DocumentInfo {
   document_id: string;

@@ -152,13 +152,15 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             request_id_ctx.reset(token)
 
         duration_ms = (time.perf_counter() - start_time) * 1000
-        self.logger.info(
-            "%s %s → %d [%s] %.1fms",
-            request.method,
-            request.url.path,
-            response.status_code,
-            request_id,
-            duration_ms,
-        )
+        is_healthcheck = request.url.path in ("/health", "/api/v1/health", "/ready", "/healthz")
+        if not (is_healthcheck and response.status_code < 400):
+            self.logger.info(
+                "%s %s → %d [%s] %.1fms",
+                request.method,
+                request.url.path,
+                response.status_code,
+                request_id,
+                duration_ms,
+            )
         response.headers["X-Request-ID"] = request_id
         return response

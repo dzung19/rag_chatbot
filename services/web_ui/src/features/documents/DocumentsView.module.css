@@ -226,7 +226,8 @@
   text-transform: capitalize;
 }
 
-.statusBadge.indexed {
+.statusBadge.indexed,
+.statusBadge.completed {
   background-color: var(--badge-green);
   color: var(--badge-green-text);
 }

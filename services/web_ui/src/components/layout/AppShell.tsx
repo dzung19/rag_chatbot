@@ -5,6 +5,7 @@ import { MobileDrawer } from "./MobileDrawer";
 import { ToastContainer } from "../ui/ToastContainer";
 import { useHealthStore } from "../../stores/healthStore";
 import { useUiStore } from "../../stores/uiStore";
+import { useDocumentsStore } from "../../stores/documentsStore";
 import styles from "./AppShell.module.css";
 
 interface AppShellProps {
@@ -14,6 +15,7 @@ interface AppShellProps {
 export const AppShell: React.FC<AppShellProps> = ({ children }) => {
   const { startPolling } = useHealthStore();
   const { theme } = useUiStore();
+  const initDocumentEvents = useDocumentsStore((state) => state.initDocumentEvents);
 
   useEffect(() => {
     // Apply current theme to HTML tag
@@ -25,6 +27,12 @@ export const AppShell: React.FC<AppShellProps> = ({ children }) => {
     const cleanup = startPolling(30000);
     return cleanup;
   }, [startPolling]);
+
+  useEffect(() => {
+    // Subscribe to real-time document events via SSE
+    const cleanup = initDocumentEvents();
+    return cleanup;
+  }, [initDocumentEvents]);
 
   return (
     <div className={styles.shell}>
