@@ -1038,10 +1038,11 @@ async def query_logs(request: LogQueryRequest):
         # Build LogQL query
         label_filters = []
         if request.service:
-            label_filters.append(f'container_name=~".*{request.service}.*"')
+            service_clean = request.service.replace("_", "-")
+            label_filters.append(f'container_name=~".*{service_clean}.*"')
 
         label_selector = (
-            "{" + ",".join(label_filters) + "}" if label_filters else '{job="docker"}'
+            "{" + ",".join(label_filters) + "}" if label_filters else '{container_name=~".+"}'
         )
 
         line_filters = ""

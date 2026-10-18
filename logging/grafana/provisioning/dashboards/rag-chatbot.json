@@ -13,7 +13,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "{job=\"docker\"} | json",
+          "expr": "{container_name=~\"rag-.+\"} | json",
           "refId": "A"
         }
       ],
@@ -34,7 +34,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "sum by (service) (count_over_time({job=\"docker\"} | json | service != \"\" [1m]))",
+          "expr": "sum by (service) (count_over_time({container_name=~\"rag-.+\"} | json | service != \"\" [1m]))",
           "refId": "A",
           "legendFormat": "{{service}}"
         }
@@ -57,7 +57,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "sum by (service) (count_over_time({job=\"docker\"} | json | level = \"ERROR\" [5m]))",
+          "expr": "sum by (service) (count_over_time({container_name=~\"rag-.+\"} | json | level = \"ERROR\" [5m]))",
           "refId": "A",
           "legendFormat": "{{service}} errors"
         }
@@ -80,7 +80,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "sum by (level) (count_over_time({job=\"docker\"} | json | level != \"\" [24h]))",
+          "expr": "sum by (level) (count_over_time({container_name=~\"rag-.+\"} | json | level != \"\" [24h]))",
           "refId": "A",
           "legendFormat": "{{level}}"
         }
@@ -93,7 +93,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "sum by (service) (count_over_time({job=\"docker\"} | json | service != \"\" [24h]))",
+          "expr": "sum by (service) (count_over_time({container_name=~\"rag-.+\"} | json | service != \"\" [24h]))",
           "refId": "A",
           "legendFormat": "{{service}}"
         }
@@ -106,7 +106,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "{job=\"docker\"} | json | level = \"ERROR\"",
+          "expr": "{container_name=~\"rag-.+\"} | json | level = \"ERROR\"",
           "refId": "A"
         }
       ],
@@ -125,5 +125,5 @@
   "timezone": "browser",
   "title": "RAG Chatbot — Logs & Metrics",
   "uid": "rag-chatbot-dashboard",
-  "version": 1
+  "version": 2
 }

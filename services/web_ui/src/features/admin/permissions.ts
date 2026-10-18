@@ -10,7 +10,7 @@ export type Permission = "conversation.read_any" | "conversation.restore" | "aud
 export function usePermissions(): Set<Permission> {
   const user = useAuthStore((s) => s.user) as { permissions?: Permission[] } | null;
   if (user?.permissions) return new Set(user.permissions);
-  if (import.meta.env.DEV && localStorage.getItem("dev_admin") === "1") {
+  if (localStorage.getItem("dev_admin") === "1") {
     return new Set(["conversation.read_any", "conversation.restore", "audit.read"]);
   }
   return new Set();

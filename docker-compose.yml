@@ -166,6 +166,8 @@ services:
       - CONVERSATION_DATABASE_URL=${DATABASE_URL:-postgresql+psycopg://rag_user:rag_password@postgres:5432/rag_chatbot}
       - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg://rag_user:rag_password@postgres:5432/rag_chatbot}
       - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-rag-internal-key}
+      - ADMIN_RESTORE_ENABLED=${ADMIN_RESTORE_ENABLED:-true}
+      - ADMIN_USER_IDS=${ADMIN_USER_IDS:-local-dev-user}
     depends_on:
       postgres:
         condition: service_healthy
@@ -198,6 +200,8 @@ services:
       - ONEDRIVE_CONNECTOR_URL=http://onedrive-connector:8004
       - LOKI_URL=http://loki:3100
       - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg://rag_user:rag_password@postgres:5432/rag_chatbot}
+      - ADMIN_RESTORE_ENABLED=${ADMIN_RESTORE_ENABLED:-true}
+      - ADMIN_USER_IDS=${ADMIN_USER_IDS:-local-dev-user}
     depends_on:
       postgres:
         condition: service_healthy
