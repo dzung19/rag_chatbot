@@ -26,11 +26,45 @@ from dataclasses import dataclass, field
 import logging
 import os
 import re
+import threading
 from typing import Any, Generator, Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+_RAPIDOCR_ENGINE: Any = None
+_RAPIDOCR_LOCK = threading.Lock()
+
+
+def _get_rapidocr_engine() -> Any:
+    """Reuse one local OCR engine per process; caller holds the OCR lock."""
+    global _RAPIDOCR_ENGINE
+    if _RAPIDOCR_ENGINE is None:
+        from rapidocr_onnxruntime import RapidOCR
+        _RAPIDOCR_ENGINE = RapidOCR()
+    return _RAPIDOCR_ENGINE
+
+
+def _needs_page_ocr(words: list[WordBox], native_text: str) -> bool:
+    """Sparse-page heuristic, not a detector for all hybrid PDF pages."""
+    word_chars = sum(len(word.text) for word in words)
+    return (len(words) < 15 or word_chars < 45) and len(native_text.strip()) < 45
+
+
+def _finalize_page_text(body_text: str, native_text: str, page_num: int,
+                        total_pages: int) -> str:
+    """Avoid returning a page marker with no usable body."""
+    body = (body_text or "").strip()
+    if not body:
+        body = (native_text or "").strip()
+        if body:
+            logger.warning("PDF reconstruction empty; using native text: page=%d", page_num)
+    if not body:
+        logger.error("PDF page has no usable text: page=%d", page_num)
+        return ""
+    return f"=== TRANG {page_num}/{total_pages} ===\n{body}"
+
 
 # ---------------------------------------------------------------------------
 # Regex Patterns for Shipping Documents (BL & BL Check List)
@@ -253,7 +287,7 @@ def _extract_single_page(
         )
         # Filter repeating margin boilerplate on multi-page docs
         if repeating_margins and (w_box.y0 < page_height * 0.055 or w_box.y1 > page_height * 0.945):
-            if text_val.lower() in repeating_margins:
+            if _normalize_margin_text(text_val) in repeating_margins:
                 continue
         words.append(w_box)
 
@@ -268,9 +302,9 @@ def _extract_single_page(
         total_chars,
     )
     # 1. Check if page is Scanned / Image-only (or hybrid with missing text layer)
-    if len(words) < 15 or total_chars < 45:
+    if _needs_page_ocr(words, native_text):
         ocr_text = _extract_scanned_page_text(page, page_num, total_pages, file_path)
-        if ocr_text and len(ocr_text.strip()) > total_chars:
+        if ocr_text and len(ocr_text.strip()) > max(total_chars, len(native_text.strip())):
             enriched_ocr = _append_shipping_structured_summary(ocr_text, page_num)
             return f"=== TRANG {page_num}/{total_pages} ===\n{enriched_ocr}"
 
@@ -305,6 +339,13 @@ def _extract_single_page(
             filtered_lines.append(vl)
         visual_lines = filtered_lines
 
+    # Propagate full-line margin filtering into box/table processing.
+    visible_word_ids = {id(w) for line in visual_lines for w in line.words}
+    words = [w for w in words if id(w) in visible_word_ids]
+    if not visual_lines:
+        # Do not reintroduce intentionally removed repeating margins.
+        return ""
+
     # 3. Check if this page looks like a Shipping / Form Document (BL, Sea Waybill, Check List)
     full_plain_probe = "\n".join(vl.render_plain() for vl in visual_lines)
     is_shipping_doc = _is_shipping_or_form_page(full_plain_probe)
@@ -328,7 +369,7 @@ def _extract_single_page(
             page_width=page_width,
         )
 
-    return f"=== TRANG {page_num}/{total_pages} ===\n{body_text.strip()}"
+    return _finalize_page_text(body_text, native_text, page_num, total_pages)
 
 
 # ---------------------------------------------------------------------------
@@ -774,13 +815,12 @@ def _append_shipping_structured_summary(page_text: str, page_num: int) -> str:
         )
         summary_parts.append("\n".join(cont_table))
 
-    # 2. Detect HS Code presence (Rule 23 check)
+    # Report extracted HS codes as evidence only; do not evaluate compliance.
     hs_matches = _HS_CODE_RE.findall(page_text)
     if hs_matches:
         unique_hs = sorted(set(hs_matches))
         summary_parts.append(
-            f"- **[PHÁT HIỆN HS CODE TRÊN TRANG {page_num}]**: `{', '.join(unique_hs)}` "
-            f"(Lưu ý quy tắc 23: Nếu tài liệu này là BL chính thức, BL không được phép hiển thị HS Code -> kết luận **SAI**)."
+            f"- **[HS CODE - TRANG {page_num}]**: `{', '.join(unique_hs)}`"
         )
 
     # 3. Detect Invoice Numbers (Step 2 check for BL Check List)
@@ -979,10 +1019,9 @@ def _extract_scanned_page_text(
 
     # 1. Try RapidOCR if installed
     try:
-        from rapidocr_onnxruntime import RapidOCR  # type: ignore[import]
-
-        ocr_engine = RapidOCR()
-        result, _ = ocr_engine(png_bytes)
+        with _RAPIDOCR_LOCK:
+            ocr_engine = _get_rapidocr_engine()
+            result, _ = ocr_engine(png_bytes)
         if result:
             ocr_words: list[WordBox] = []
             for box, text_val, _score in result:
@@ -1018,7 +1057,7 @@ def _extract_scanned_page_text(
             logger.info("Extracted scanned page %d of %s via pytesseract", page_num, file_path)
             return text_out.strip()
     except ImportError:
-        logger.info("RapidOCR is not installed.")
+        logger.info("pytesseract or Pillow is not installed.")
         pass
     except Exception as e:
         logger.warning(
@@ -1027,7 +1066,7 @@ def _extract_scanned_page_text(
             str(e),
         )
 
-    # 3. Fallback to Ollama Multimodal Vision API (e.g., gemma4 supports images natively)
+    # 3. Fallback to the configured Ollama Vision model
     vision_text = _ollama_vision_transcribe_page(png_bytes, page_num)
     if vision_text:
         logger.info("Extracted scanned page %d of %s via Ollama Vision", page_num, file_path)
@@ -1157,4 +1196,8 @@ def _ollama_vision_transcribe_page(
             "PDF Vision connection/timeout error: page=%d",
             page_num,
         )
+        return ""
+
+    except (ValueError, TypeError, AttributeError):
+        logger.exception("PDF Vision returned an invalid response: page=%d", page_num)
         return ""
