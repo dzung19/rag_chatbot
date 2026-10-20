@@ -281,7 +281,7 @@ async def query_sync(
         raw_answer = await llm.generate(
             messages=messages,
             temperature=temperature,
-            num_ctx=16384 if request.skill_id == "business-compare" else None,
+            num_ctx=32768 if request.skill_id == "business-compare" else None,
         )
 
         # Post-process to clean LaTeX math arrows to simple Unicode arrows
@@ -450,7 +450,7 @@ async def query_stream(request: ChatRequest):
                         else 1024
                     ),
                     num_ctx=(
-                        16384
+                        32768
                         if request.skill_id == "business-compare"
                         else None
                     ),

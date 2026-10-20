@@ -56,7 +56,17 @@ BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, H
 - REQUEST NO. ↔ SHIPMENT/SHIPMENT NO.
 - NOTIFY PARTY 2 ↔ ALSO NOTIFY PARTY.
 - ETD HPH ON trong REQUEST ↔ ETD trên BL.
-- ISSUE DATE phải bằng ETD.
+- ETD: lấy ETD/ETD HPH của đúng cảng đi và chặng.
+- ON-BOARD DATE: lấy ngày tại Laden/Shipped on Board.
+- ISSUE DATE: lấy ngày trong vùng phát hành chứng từ.
+- Nhãn Date/Dated phải được xác định theo vùng chứa, không lấy ngày bất kỳ.
+- Ưu tiên đối chiếu ETD trực tiếp. Nếu BL chỉ có on-board date,
+  ghi rõ đây là ngày liên quan; chỉ dùng thay ETD khi nghiệp vụ cho phép.
+- Kiểm tra ISSUE DATE = ETD riêng; không dùng issue date để điền ETD.
+- Chuẩn hóa định dạng ngày nhưng giữ giá trị gốc và trang nguồn.
+- Nếu có ngày nhưng ánh xạ chưa rõ, kết luận KHÔNG HIỂU.
+  Chỉ kết luận KHÔNG TÌM THẤY sau khi kiểm tra đủ nội dung;
+  nếu context bị cắt, ghi CHƯA ĐỦ BẰNG CHỨNG.
 - SDD trên BL Check List ↔ DOOR trên BL. Ví dụ: `CY / BADEN SDD` ↔ `CY/DOOR`.
 
 # Các bước kiểm tra
@@ -73,7 +83,7 @@ BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, H
    - 4.3. Trích xuất description trên BL theo từng container, giữ nguyên mọi lần lặp.
    - 4.4. Thứ tự kiểm tra: Mỗi description chuẩn phải xuất hiện đúng 1 lần trên toàn bộ BL (0 lần → **SAI: thiếu**, >=2 lần → **SAI: trùng lặp**, ngoài danh sách chuẩn → **SAI: thừa**).
 5. **Đối chiếu toàn bộ 23 hạng mục:**
-   1. SHIPPER với dữ liệu chuẩn. 2. CONSIGNEE. 3. NOTIFY PARTY 1. 4. NOTIFY PARTY 2. 5. DELIVERY TO. 6. CONTAINER NO. 7. SEAL NO. 8. CONTAINER TYPE. 9. P'KGS. 10. WEIGHT. 11. MEASUREMENT/M3. 12. Tổng P'KGS, WEIGHT và MEASUREMENT/M3. 13. GOODS DESCRIPTION. 14. PORT OF LOADING. 15. PORT OF DISCHARGE. 16. PLACE OF DELIVERY. 17. ETD. 18. ISSUE DATE = ETD. 19. Tổng số container + loại container. 20. Delivery term (CY-CY, CY-DOOR, CFS-CFS, CFS-DOOR). 21. SHIPMENT NO. 22. B/L REQUIRED. 23. HS code (BL không được hiển thị HS code, nếu có là **SAI**).
+   1. SHIPPER với dữ liệu chuẩn.(Lấy SHIPPER riêng từng file, dừng tại nhãn kế tiếp; không lấy số tiền hoặc INCOTERMS. Không coi SHIPPER lặp ở nhiều invoice là sai.) 2. CONSIGNEE. 3. NOTIFY PARTY 1. 4. NOTIFY PARTY 2. 5. DELIVERY TO. 6. CONTAINER NO. 7. SEAL NO. 8. CONTAINER TYPE. 9. P'KGS. 10. WEIGHT. 11. MEASUREMENT/M3. 12. Tổng P'KGS, WEIGHT và MEASUREMENT/M3. 13. GOODS DESCRIPTION. 14. PORT OF LOADING. 15. PORT OF DISCHARGE. 16. PLACE OF DELIVERY. 17. ETD. 18. ISSUE DATE = ETD. 19. Tổng số container + loại container. 20. Delivery term (CY-CY, CY-DOOR, CFS-CFS, CFS-DOOR). 21. SHIPMENT NO. 22. B/L REQUIRED. 23. HS code (BL không được hiển thị HS code, nếu có là **SAI**).
 
 # Định dạng đầu ra (Báo cáo dạng Bảng Markdown)
 
