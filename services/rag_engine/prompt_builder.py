@@ -97,7 +97,9 @@ def build_compare_context_text(
 ) -> str:
     """Format and balance full text of documents for direct comparison.
 
-    Ensures fair character budgeting so neither document dominates the context window.
+    Automatically identifies which document is the B/L Check List (chuẩn) and which is the
+    Bill of Lading / Sea Waybill (đối chiếu), ensuring consistent role mapping regardless
+    of the order they were selected.
     """
     if not context_chunks:
         return "No documents provided for comparison."
@@ -105,8 +107,16 @@ def build_compare_context_text(
     if len(context_chunks) != 2:
         return build_context_text(context_chunks, max_chars=max_chars)
 
-    doc1 = context_chunks[0]
-    doc2 = context_chunks[1]
+    # Automatically identify and assign roles
+    try:
+        from compare_engine import resolve_compare_roles
+        doc1, doc2, role_meta = resolve_compare_roles(context_chunks[0], context_chunks[1])
+        is_shipping = role_meta.get("is_shipping_pair", False)
+    except Exception as e:
+        logger.warning("Role resolution failed, using default order: %s", str(e))
+        doc1 = context_chunks[0]
+        doc2 = context_chunks[1]
+        is_shipping = False
 
     name1 = doc1.get("metadata", {}).get("filename") or "Tài liệu 1"
     name2 = doc2.get("metadata", {}).get("filename") or "Tài liệu 2"
@@ -115,7 +125,7 @@ def build_compare_context_text(
     text2 = doc2.get("text", "").strip()
 
     # Reserve characters for headers and separators
-    overhead = len(name1) + len(name2) + 250
+    overhead = len(name1) + len(name2) + 350
     available_chars = max(1000, max_chars - overhead)
 
     len1 = len(text1)
@@ -138,6 +148,18 @@ def build_compare_context_text(
             text1 = text1[:budget1] + "\n... [Nội dung phía sau đã được cắt bớt để đảm bảo giới hạn bộ nhớ ngữ cảnh]"
         if len2 > budget2:
             text2 = text2[:budget2] + "\n... [Nội dung phía sau đã được cắt bớt để đảm bảo giới hạn bộ nhớ ngữ cảnh]"
+
+    if is_shipping:
+        return (
+            f"=== TÀI LIỆU 1 (CHUẨN / B/L CHECK LIST): {name1} ===\n"
+            f"[VAI TRÒ: TÀI LIỆU GỐC / CHUẨN ĐỂ ĐỐI CHIẾU — B/L CHECK LIST]\n"
+            f"{text1}\n"
+            f"=== HẾT TÀI LIỆU 1 (B/L CHECK LIST: {name1}) ===\n\n"
+            f"=== TÀI LIỆU 2 (CHỨNG TỪ VẬN TẢI / B/L / SEA WAYBILL): {name2} ===\n"
+            f"[VAI TRÒ: CHỨNG TỪ HÃNG TÀU PHÁT HÀNH CẦN KIỂM TRA — BILL OF LADING / SEA WAYBILL]\n"
+            f"{text2}\n"
+            f"=== HẾT TÀI LIỆU 2 (B/L / SEA WAYBILL: {name2}) ==="
+        )
 
     return (
         f"=== TÀI LIỆU 1 (GỐC / THAM CHIẾU): {name1} ===\n"

@@ -253,6 +253,18 @@ async def query_sync(
                     model=settings.ollama_model,
                     processing_time_ms=round((time.perf_counter() - start_time) * 1000, 1),
                 )
+
+            # Auto-identify which is Checklist and which is BL, reordering if necessary
+            if len(results) == 2:
+                from compare_engine import resolve_compare_roles
+                doc_checklist, doc_bl, role_meta = resolve_compare_roles(results[0], results[1])
+                results = [doc_checklist, doc_bl]
+                logger.info(
+                    "COMPARE roles identified: checklist='%s', bl='%s', swapped=%s",
+                    role_meta.get("checklist_filename"),
+                    role_meta.get("bl_filename"),
+                    role_meta.get("swapped"),
+                )
         else:
             where_filter = (
                 {"document_ids": request.selected_document_ids}
@@ -394,6 +406,18 @@ async def query_stream(request: ChatRequest):
                     yield {"event": "token", "data": error_msg}
                     yield {"event": "done", "data": json.dumps({"query": request.query, "total_chunks": 0})}
                     return
+
+                # Auto-identify which is Checklist and which is BL, reordering if necessary
+                if len(results) == 2:
+                    from compare_engine import resolve_compare_roles
+                    doc_checklist, doc_bl, role_meta = resolve_compare_roles(results[0], results[1])
+                    results = [doc_checklist, doc_bl]
+                    logger.info(
+                        "COMPARE roles identified: checklist='%s', bl='%s', swapped=%s",
+                        role_meta.get("checklist_filename"),
+                        role_meta.get("bl_filename"),
+                        role_meta.get("swapped"),
+                    )
             else:
                 where_filter = (
                     {"document_ids": request.selected_document_ids}
