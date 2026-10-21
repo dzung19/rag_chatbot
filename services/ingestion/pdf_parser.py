@@ -66,6 +66,45 @@ def _finalize_page_text(body_text: str, native_text: str, page_num: int,
     return f"=== TRANG {page_num}/{total_pages} ===\n{body}"
 
 
+def _is_pure_terms_and_conditions_page(text: str) -> bool:
+    """Detect if a page consists entirely of standard reverse-side carrier contract terms."""
+    if len(text) < 4000:
+        return False
+    # If it contains specific container numbers or booking/invoice identifiers, it is not a pure terms page
+    if re.search(r"\b[A-Z]{4}\d{7}\b", text):
+        return False
+    if re.search(r"\b(?:BOOKING\s+NO|INVOICE\s+NO|B/L\s+CHECK\s+LIST|PACKAGES\s+AND\s+GOODS)\b", text, re.I):
+        return False
+
+    terms_keywords = (
+        "terms and conditions",
+        "scope of voyage",
+        "limitation of liability",
+        "carrier shall have the benefit",
+        "general average",
+        "contracted for may or may not include",
+        "subrogated to all rights",
+        "clause 1",
+    )
+    lower = text.lower()
+    hits = sum(1 for kw in terms_keywords if kw in lower)
+    return hits >= 2
+
+
+def _normalize_container_type(raw_type: str) -> str:
+    """Normalize container type strings across different carrier formats."""
+    if not raw_type or raw_type == "N/A":
+        return "N/A"
+    upper = raw_type.upper().replace(" ", "").replace("-", "").replace("'", "")
+    if any(k in upper for k in ["40HC", "40HQ", "HIGHCUBE", "40FT9FT6IN"]):
+        return "40HC"
+    if any(k in upper for k in ["20GP", "20DC", "20STD"]):
+        return "20GP"
+    if any(k in upper for k in ["40GP", "40DC", "40STD"]):
+        return "40GP"
+    return raw_type.strip()
+
+
 # ---------------------------------------------------------------------------
 # Regex Patterns for Shipping Documents (BL & BL Check List)
 # ---------------------------------------------------------------------------
@@ -101,23 +140,23 @@ _HS_CODE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Invoice number detection (Step 2 of BL Check List)
+# Invoice number detection (Step 2 of BL Check List - supports optional (BIL) annotation)
 _INVOICE_NO_RE = re.compile(
-    r"\bINVOICE\s*NO\.?\s*[:#\-]?\s*([A-Z0-9][A-Z0-9\-/\s]*)",
+    r"\bINVOICE\s*NO\.?\s*(?:\([^)]*\)\s*)?[:#\-|]?\s*([0-9]{5,}-\d+(?:\s+\d+)*|[A-Z0-9]{4,}[A-Z0-9\-]*)",
     re.IGNORECASE,
 )
 
 # Standard BL / Shipping Form Box Labels used as spatial anchors when vector boxes are incomplete
 _BL_LABEL_ANCHORS: list[tuple[str, re.Pattern[str]]] = [
-    ("1. Shipper", re.compile(r"^(?:1\.?\s*)?Shipper\b", re.I)),
+    ("1. Shipper", re.compile(r"^(?:1\.?\s*)?Shipper\b(?!\s*['’]s\s*ref)", re.I)),
     ("2. Consignee", re.compile(r"^(?:2\.?\s*)?Consignee\b", re.I)),
-    ("3. Notify Party", re.compile(r"^(?:3\.?\s*)?Notify\s+Party\b(?!\s*2)", re.I)),
+    ("3. Notify Party", re.compile(r"^(?:3\.?\s*)?Notify\s+Part(?:y|ies)(?:\s*\(\s*1\s*\))?(?!\s*(?:2|\(\s*2\s*\)))", re.I)),
     (
         "Notify Party 2 / Also Notify",
-        re.compile(r"^(?:Also\s+Notify(?:\s+Party)?(?:\s*[-–]?\s*routing\s*&\s*Instructions)?|Notify\s+Party\s*2)\b", re.I),
+        re.compile(r"^(?:Also\s+Notify(?:\s+Party)?(?:\s*[-–]?\s*routing\s*&\s*Instructions)?|Notify\s+Part(?:y|ies)\s*(?:2|\(\s*2\s*\))|…?\s*CONTINUED\s+FROM\s+NOTIFY\s+PARTIES)", re.I),
     ),
-    ("Booking No.", re.compile(r"^Booking\s+No\.?", re.I)),
-    ("Sea Waybill / B/L No.", re.compile(r"^(?:Sea\s+Waybill\s+No\.?|B/L\s+No\.?|Bill\s+of\s+Lading\s+No\.?)", re.I)),
+    ("Booking No.", re.compile(r"^(?:Booking\s+Ref\.?|Booking\s+No\.?)\b", re.I)),
+    ("Sea Waybill / B/L No.", re.compile(r"^(?:Sea\s+Waybill\s+No\.?|B/L\s+No\.?|Bill\s+of\s+Lading\s+No\.?|BILL\s+OF\s+LADING\s*\(AIR\s+WAYBILL\))", re.I)),
     ("Export References", re.compile(r"^Export\s+References\b", re.I)),
     ("Forwarding Agent", re.compile(r"^Forwarding\s+Agent(?:\s+and\s+References)?(?:\s+FMC/CHB\s+No\.?)?\b", re.I)),
     ("Point and Country of Origin", re.compile(r"^Point\s+and\s+Country\s+of\s+Origin\b", re.I)),
@@ -128,13 +167,19 @@ _BL_LABEL_ANCHORS: list[tuple[str, re.Pattern[str]]] = [
     ("7. Port of Loading", re.compile(r"^(?:7\.?\s*)?Port\s+of\s+Loading\b", re.I)),
     ("Service Contract No.", re.compile(r"^Service\s+Contract\s+No\.?", re.I)),
     ("Doc. Form No.", re.compile(r"^Doc\.?\s+Form\s+No\.?", re.I)),
-    ("8. Port of Discharge", re.compile(r"^(?:8\.?\s*)?Port\s+of\s+Discharge\b", re.I)),
+    ("Port of Discharge Agent", re.compile(r"^Port\s+of\s+Discharge\s+Agent\b", re.I)),
+    ("8. Port of Discharge", re.compile(r"^(?:8\.?\s*)?Port\s+of\s+Discharge\b(?!\s+Agent)", re.I)),
     ("9. Place of Delivery", re.compile(r"^(?:9\.?\s*)?(?:Combined\s+Transport\s*\*?\s*)?Place\s+of\s+Delivery\b", re.I)),
     ("Type of Movement", re.compile(r"^Type\s+of\s+Movement\b", re.I)),
     ("10. Total Number of Containers/Packages", re.compile(r"^10\.?\s*Total\s+Number\s+of\s+Containers(?:\s+and/or\s+Packages\s*\(in\s+words\))?", re.I)),
-    ("Date Laden on Board / On Board Date", re.compile(r"^(?:Date\s+Laden\s+on\s+Board|Laden\s+on\s+Board|Shipped\s+on\s+Board|On\s+Board\s+Date|Received\s+Date)\b", re.I)),
-    ("Date of Issue", re.compile(r"^(?:Date\s+of\s+Issue|Issue\s+Date)\b", re.I)),
+    ("Date Laden on Board / On Board Date", re.compile(r"^(?:Shipped\s+on\s+Board\s+Date|Date\s+Laden\s+on\s+Board|Laden\s+on\s+Board|Shipped\s+on\s+Board|On\s+Board\s+Date|Received\s+Date)\b", re.I)),
+    ("Date of Issue", re.compile(r"^(?:Place\s+and\s+Date\s+of\s+Issue|Date\s+of\s+Issue|Issue\s+Date)\b", re.I)),
     ("Place of Issue", re.compile(r"^Place\s+of\s+Issue\b", re.I)),
+    ("Request No. / Shipment No.", re.compile(r"^(?:Request\s+No\.?|Shipment\s+No\.?|Shipment\b)", re.I)),
+    ("B/L Required", re.compile(r"^B/L\s+Required\b", re.I)),
+    ("From (Request)", re.compile(r"^From\b(?!\s+to\b)", re.I)),
+    ("Via (Request)", re.compile(r"^Via\b", re.I)),
+    ("To (Request)", re.compile(r"^To\b", re.I)),
 ]
 
 
@@ -192,6 +237,9 @@ class VisualLine:
             if gap >= col_gap_pt:
                 parts.append(" | ")
                 parts.append(w.text)
+            elif -1.0 <= gap < 0.8 and parts and parts[-1] and parts[-1][-1].isalnum() and w.text and w.text[0].isalnum():
+                # Sub-word fragment from broken font kerning in PDFs; join directly
+                parts[-1] += w.text
             elif gap < -1.0:
                 # Overlapping duplicate glyph in some PDFs; skip if identical
                 if w.text != parts[-1]:
@@ -202,11 +250,22 @@ class VisualLine:
         return "".join(parts).strip()
 
     def render_plain(self) -> str:
-        """Render words with single spaces."""
+        """Render words with single spaces, joining sub-word fragments."""
         if not self.words:
             return ""
         sorted_w = sorted(self.words, key=lambda w: w.x0)
-        return " ".join(w.text for w in sorted_w).strip()
+        parts = [sorted_w[0].text]
+        prev_x1 = sorted_w[0].x1
+        for w in sorted_w[1:]:
+            gap = w.x0 - prev_x1
+            if -1.0 <= gap < 0.8 and parts and parts[-1] and parts[-1][-1].isalnum() and w.text and w.text[0].isalnum():
+                parts[-1] += w.text
+            elif gap < -1.0 and w.text == parts[-1]:
+                pass
+            else:
+                parts.append(w.text)
+            prev_x1 = max(prev_x1, w.x1)
+        return " ".join(parts).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -265,15 +324,34 @@ def _extract_single_page(
     page_width = float(rect.width or 600.0)
     page_height = float(rect.height or 800.0)
 
-    raw_words = page.get_text("words") or []
-    words: list[WordBox] = []
     native_text = page.get_text(
         "text",
         sort=True,
     ).strip()
+
+    # Check if page is pure carrier contract terms & conditions boilerplate (e.g. back of Sea Waybill)
+    if _is_pure_terms_and_conditions_page(native_text):
+        logger.info(
+            "PDF page %d/%d identified as standard carrier Terms & Conditions page; summarizing.",
+            page_num,
+            total_pages,
+        )
+        return (
+            f"=== TRANG {page_num}/{total_pages} ===\n"
+            "[ĐIỀU KHOẢN VẬN TẢI TIÊU CHUẨN CỦA HÃNG TÀU (TERMS & CONDITIONS) - KHÔNG CHỨA DỮ LIỆU ĐỐI CHIẾU HÀNG HÓA]"
+        )
+
+    raw_words = page.get_text("words") or []
+    words: list[WordBox] = []
     for rw in raw_words:
         text_val = str(rw[4]).strip()
         if not text_val:
+            continue
+        # Filter 2D barcode text strings (e.g. PDF417 digit streams >= 35 digits)
+        if re.match(r"^[0-9]{35,}$", text_val):
+            continue
+        # Filter mask/redaction placeholders (e.g. XXXXXXXX)
+        if re.match(r"^X{6,}$", text_val):
             continue
         w_box = WordBox(
             x0=float(rw[0]),
@@ -536,11 +614,23 @@ def _extract_bl_anchor_boxes(
     # Sort anchors top-to-bottom, left-to-right
     anchors.sort(key=lambda a: (round(a["y0"] / 6.0), a["x0"]))
 
-    # Also detect where the Cargo Table starts (e.g. "Marks & Nos." or "Description of Goods")
+    # Also detect where tabular/cargo sections start
     cargo_top_y = page_height * 0.85
     for vl in visual_lines:
         line_up = vl.render_plain().upper()
-        if ("MARKS" in line_up and "NOS" in line_up) or "DESCRIPTION OF GOODS" in line_up:
+        if any(
+            kw in line_up
+            for kw in (
+                "MARKS AND NOS",
+                "MARKS & NOS",
+                "DESCRIPTION OF GOODS",
+                "DESCRIPTION OF PACKAGES",
+                "PARTICULARS FURNISHED",
+                "STUFFING PLAN",
+                "ORDER NO.",
+                "INVOICE NO.",
+            )
+        ):
             cargo_top_y = vl.y0 - 2.0
             break
 
@@ -568,6 +658,26 @@ def _extract_bl_anchor_boxes(
         if anc["y0"] < cargo_top_y:
             bottom_candidates.append(cargo_top_y)
 
+        # Stop box before any cargo table header, stuffing plan, or separator line below anc["y1"]
+        for vl in visual_lines:
+            if vl.y0 > anc["y1"]:
+                line_up = vl.render_plain().upper()
+                if any(
+                    kw in line_up
+                    for kw in (
+                        "MARKS AND NOS",
+                        "MARKS & NOS",
+                        "DESCRIPTION OF GOODS",
+                        "DESCRIPTION OF PACKAGES",
+                        "PARTICULARS FURNISHED",
+                        "STUFFING PLAN",
+                        "ORDER NO.",
+                        "===============",
+                    )
+                ):
+                    bottom_candidates.append(vl.y0 - 2.0)
+                    break
+
         for other in anchors:
             if other is anc:
                 continue
@@ -592,8 +702,28 @@ def _extract_bl_anchor_boxes(
         # (e.g. "Date Laden on Board 4 SEP 2021" or "Date of Issue 4 SEP 2021")
         inline_val = _extract_inline_value_from_header(anc["label"], anc["raw_header"])
 
+        # Check for same-line value situated horizontally to the right of the anchor before box_x1
+        other_header_ids = {wid for o in anchors if o is not anc for wid in o["header_words"]}
+        same_line_words = [
+            w for w in words
+            if id(w) not in anc["header_words"]
+            and id(w) not in other_header_ids
+            and (anc["y0"] - 3.0 <= w.cy <= anc["y1"] + 3.0)
+            and (anc["x1"] + 2.0 <= w.cx <= box_x1)
+            and not re.match(r"^[0-9]{35,}$", w.text)
+            and not re.match(r"^X{6,}$", w.text)
+        ]
+        if same_line_words and not inline_val:
+            same_line_words.sort(key=lambda w: w.x0)
+            same_line_val = " ".join(w.text for w in same_line_words).strip()
+            # Ignore sub-labels or connective headers like "(or) SHIPPER'S REF."
+            if same_line_val and not re.search(r"\b(?:or|ref\.?|shipper'?s|freight)\b", same_line_val, re.I):
+                inline_val = same_line_val
+
         for w in words:
             if id(w) in anc["header_words"]:
+                continue
+            if re.match(r"^[0-9]{35,}$", w.text) or re.match(r"^X{6,}$", w.text):
                 continue
             if ax0 <= w.cx <= box_x1 and anc["y1"] - 2.0 <= w.cy <= box_y1:
                 box_words.append(w)
@@ -610,8 +740,12 @@ def _extract_bl_anchor_boxes(
                 re.I,
             )
         ]
+        # For single-value headers (B/L No., Booking No., Request No., Dates), prefer inline_val if available
         if inline_val:
-            cleaned_lines.insert(0, inline_val)
+            if anc["label"] in ("Sea Waybill / B/L No.", "Booking No.", "Request No. / Shipment No."):
+                cleaned_lines = [inline_val]
+            else:
+                cleaned_lines.insert(0, inline_val)
 
         final_val = "\n".join(cleaned_lines).strip()
         if final_val:
@@ -744,46 +878,122 @@ def _append_shipping_structured_summary(page_text: str, page_num: int) -> str:
     """
     summary_parts: list[str] = []
 
-    # 1. Extract Container rows (e.g. BEAU2247050 /00001160 / 20 PACKAGES /FCL/FCL /20GP/18929.000KGS/26.000CBM)
+    # 1. Multi-layout Container Extraction:
+    # Handles:
+    # A) Multi-line block layout (MSC RIDER page, etc.)
+    # B) Checklist stuffing plan with S-TOTAL rows
+    # C) Single-line container layout
+    cont_re = re.compile(r"\b([A-Z]{4}\d{7})\b")
+    matches = list(cont_re.finditer(page_text))
+
     containers: list[dict[str, Any]] = []
     seen_conts: set[str] = set()
 
-    for line in page_text.splitlines():
-        m = _CONTAINER_LINE_RE.search(line)
-        if m:
-            cont_no = m.group(1).upper()
-            seal_no = (m.group(2) or "").strip(" /|-")
-            pkgs_str = m.group(3) or "0"
-            pkg_unit = (m.group(4) or "PACKAGES").upper()
-            middle_seg = m.group(5) or ""
-            weight_str = m.group(6) or "0"
-            cbm_str = m.group(7) or "0"
-
-            term_m = _MOVEMENT_TERM_RE.search(middle_seg) or _MOVEMENT_TERM_RE.search(line)
-            movement = term_m.group(1).upper().replace(" ", "") if term_m else ""
-
-            type_m = _CONT_TYPE_RE.search(middle_seg) or _CONT_TYPE_RE.search(line)
-            cont_type = type_m.group(1).upper().replace(" ", "") if type_m else ""
-
-            key = f"{cont_no}_{seal_no}_{pkgs_str}_{weight_str}"
-            if key in seen_conts:
+    if matches:
+        for idx, m in enumerate(matches):
+            c_no = m.group(1).upper()
+            if c_no in seen_conts:
                 continue
-            seen_conts.add(key)
 
-            containers.append(
-                {
-                    "container_no": cont_no,
-                    "seal_no": seal_no or "N/A",
-                    "pkgs": _parse_float_safe(pkgs_str),
-                    "pkgs_raw": f"{pkgs_str} {pkg_unit}",
-                    "movement": movement or "N/A",
-                    "type": cont_type or "N/A",
-                    "weight": _parse_float_safe(weight_str),
-                    "weight_raw": f"{weight_str} KGS",
-                    "cbm": _parse_float_safe(cbm_str),
-                    "cbm_raw": f"{cbm_str} CBM" if cbm_str != "0" else "N/A",
-                }
+            start = m.start()
+            if idx + 1 < len(matches):
+                end = matches[idx + 1].start()
+            else:
+                # Last container on page: find where grand totals or footer starts strictly AFTER this container
+                rest = page_text[start:]
+                term_m = re.search(
+                    r"\b(?:G-TOTAL\b|Total\s*:|TOTAL\s*[:\s]+[0-9]|SHIPMENT\s*:|PLACE AND DATE OF ISSUE|SHIPPED ON BOARD DATE|CARRIER'S RECEIPT)\b",
+                    rest,
+                    re.I,
+                )
+                if term_m:
+                    end = start + term_m.start()
+                else:
+                    end = min(len(page_text), start + 1200)
+
+            block = page_text[start:end]
+
+            # 1.1 S-TOTAL row (Checklist format: S-TOTAL | <sets> | <pkgs> | <weight> | <cbm>)
+            stot_m = re.search(
+                r"S-TOTAL\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)",
+                block,
+                re.I,
             )
+            if stot_m:
+                raw_p = stot_m.group(2).strip()
+                raw_w = stot_m.group(3).strip()
+                raw_c = stot_m.group(4).strip()
+                pkgs_str = f"{raw_p} PKGS"
+                weight_str = f"{raw_w} KGS"
+                cbm_str = f"{raw_c} CBM"
+            else:
+                # 1.2 RIDER / Standard layout
+                p_m = re.search(
+                    r"(\d[\d,.]*)\s*(packages?|pkgs?|pallets?|cartons?|ctns?|bags?|drums?|pcs|units?)(?:\(s\))?",
+                    block,
+                    re.I,
+                )
+                pkgs_str = f"{p_m.group(1)} {p_m.group(2).upper()}" if p_m else "N/A"
+
+                w_m = re.search(
+                    r"(\d[\d,.]*)\s*(?:kgs?|kg)\b", block, re.I
+                ) or re.search(r"(?:kgs?|kg)\b[:\s]*(\d[\d,.]*)", block, re.I)
+                weight_str = f"{w_m.group(1).rstrip('.')} KGS" if w_m else "N/A"
+
+                c_m = re.search(
+                    r"(\d[\d,.]*)\s*(?:cbm|m3|mtq|cu\.?\s*m\.?)\b", block, re.I
+                ) or re.search(r"(?:cbm|m3|mtq|cu\.?\s*m\.?)\b[:\s]*(\d[\d,.]*)", block, re.I)
+                cbm_str = f"{c_m.group(1).rstrip('.')} CBM" if c_m else "N/A"
+
+            # 1.3 Seal No
+            s_m = re.search(
+                r"(?:Carrier|Seal\s*(?:Number|No\.?)?[:\s|]*Carrier?|SEAL\s*NO\.?[:\s|]*)\s+([A-Z0-9\-]{5,20})",
+                block,
+                re.I,
+            )
+            seal_no = s_m.group(1).strip() if s_m else "N/A"
+
+            # 1.4 Type
+            t_m = re.search(
+                r"((?:20|40|45)(?:\'|\s*ft)?\s*(?:gp|dc|hc|hq|rf|ot|fr|tk|std|high\s+cube)|40HC:40FT[^\n|]+)",
+                block,
+                re.I,
+            )
+            cont_type = _normalize_container_type(t_m.group(1)) if t_m else "N/A"
+
+            # 1.5 Movement Term
+            term_m = re.search(
+                r"([A-Z\s]+CY\s*/\s*[A-Z\s]+CY|[A-Z\s]+CY\s*/\s*[A-Z\s]+SDD|\b(?:FCL\s*/\s*FCL|LCL\s*/\s*LCL|CY\s*[\-/]\s*CY|CY\s*[\-/]\s*DOOR|CFS\s*[\-/]\s*CFS)\b)",
+                block,
+                re.I,
+            )
+            if term_m:
+                tm = term_m.group(1).upper()
+                if "CY" in tm.split("/")[-1]:
+                    movement = "CY-CY"
+                elif "SDD" in tm or "DOOR" in tm:
+                    movement = "CY-DOOR"
+                else:
+                    movement = tm.replace(" ", "")
+            else:
+                movement = "N/A"
+
+            if weight_str != "N/A" or pkgs_str != "N/A" or seal_no != "N/A":
+                seen_conts.add(c_no)
+                containers.append(
+                    {
+                        "container_no": c_no,
+                        "seal_no": seal_no,
+                        "pkgs": _parse_float_safe(pkgs_str.split()[0]) if pkgs_str != "N/A" else 0.0,
+                        "pkgs_raw": pkgs_str,
+                        "movement": movement,
+                        "type": cont_type,
+                        "weight": _parse_float_safe(weight_str.split()[0]) if weight_str != "N/A" else 0.0,
+                        "weight_raw": weight_str,
+                        "cbm": _parse_float_safe(cbm_str.split()[0]) if cbm_str != "N/A" else 0.0,
+                        "cbm_raw": cbm_str,
+                    }
+                )
 
     if containers:
         cont_table = [
@@ -815,7 +1025,21 @@ def _append_shipping_structured_summary(page_text: str, page_num: int) -> str:
         )
         summary_parts.append("\n".join(cont_table))
 
-    # Report extracted HS codes as evidence only; do not evaluate compliance.
+    # 2. Check for orphan S-TOTAL before first container (continued from previous page)
+    first_cont_pos = matches[0].start() if matches else len(page_text)
+    header_section = page_text[:first_cont_pos]
+    orphan_stot = re.search(
+        r"S-TOTAL\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)",
+        header_section,
+        re.I,
+    )
+    if orphan_stot:
+        summary_parts.append(
+            f"- **[S-TOTAL CHUYỂN TIẾP TỪ TRANG TRƯỚC - TRANG {page_num}]**: "
+            f"Sets: {orphan_stot.group(1)} | P'KGS: {orphan_stot.group(2)} | Gross Weight: {orphan_stot.group(3)} KGS | Measurement: {orphan_stot.group(4)} CBM"
+        )
+
+    # 3. Report extracted HS codes as evidence only; do not evaluate compliance.
     hs_matches = _HS_CODE_RE.findall(page_text)
     if hs_matches:
         unique_hs = sorted(set(hs_matches))
@@ -823,18 +1047,63 @@ def _append_shipping_structured_summary(page_text: str, page_num: int) -> str:
             f"- **[HS CODE - TRANG {page_num}]**: `{', '.join(unique_hs)}`"
         )
 
-    # 3. Detect Invoice Numbers (Step 2 check for BL Check List)
+    # 4. Detect Invoice Numbers & Totals (Step 2 check for BL Check List)
     inv_matches: list[str] = []
-    for line in page_text.splitlines():
+    inv_detail_lines: list[str] = []
+    lines = page_text.splitlines()
+    for idx, line in enumerate(lines):
         if "INVOICE" in line.upper():
             for m in _INVOICE_NO_RE.finditer(line):
                 raw_inv = m.group(1).strip()
-                if raw_inv:
-                    inv_matches.append(raw_inv)
+                if raw_inv and raw_inv.upper() not in ("FREIGHT", "NONE", "N/A", "COLLECT", "PREPAID", "CONTAINER"):
+                    # Expand shorthand notation like 824957-0 1 -> 824957-0, 824957-1
+                    shorthand_m = re.match(r"^(\d+)-(\d+)\s+(\d+)$", raw_inv)
+                    if shorthand_m:
+                        prefix = shorthand_m.group(1)
+                        inv_matches.extend([f"{prefix}-{shorthand_m.group(2)}", f"{prefix}-{shorthand_m.group(3)}"])
+                    else:
+                        inv_matches.append(raw_inv)
+
+            # Check if invoice section contains TTL figures in following lines
+            subsequent = "\n".join(lines[idx:idx + 8])
+            p_m = re.search(r"TTL\s*(\d[\d,.]*)\s*P'?KG", subsequent, re.I)
+            w_m = re.search(r"TTL\s*(\d[\d,.]*)\s*KGS", subsequent, re.I)
+            c_m = re.search(r"TTL\s*(\d[\d,.]*)\s*M3", subsequent, re.I)
+            if p_m and w_m and c_m and inv_matches:
+                inv_name = inv_matches[-1]
+                inv_detail_lines.append(
+                    f"  - Invoice `{inv_name}`: {p_m.group(1)} P'KG | {w_m.group(1)} KGS | {c_m.group(1)} M3"
+                )
+
     if inv_matches:
+        unique_invoices = list(dict.fromkeys(inv_matches))
+        inv_summary = f"- **[DANH SÁCH INVOICE NO. TRÊN TRANG {page_num}]**: {', '.join(unique_invoices)}"
+        if inv_detail_lines:
+            inv_summary += "\n" + "\n".join(inv_detail_lines)
+        summary_parts.append(inv_summary)
+
+    # 5. Grand Total extraction (G-TOTAL / Carrier Total)
+    gtot_m = re.search(
+        r"G-TOTAL\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)",
+        page_text,
+        re.I,
+    )
+    if gtot_m:
         summary_parts.append(
-            f"- **[DANH SÁCH INVOICE NO. TRÊN TRANG {page_num}]**: {', '.join(dict.fromkeys(inv_matches))}"
+            f"- **[GRAND TOTAL (G-TOTAL) - TRANG {page_num}]**: "
+            f"Sets: {gtot_m.group(1)} | P'KGS: {gtot_m.group(2)} | Gross Weight: {gtot_m.group(3)} KGS | Measurement: {gtot_m.group(4)} CBM"
         )
+    else:
+        msc_tot = re.search(
+            r"Total\s*:\s*\|\s*(\d[\d,.]*)\s*kgs?\.?\s*\|\s*(\d[\d,.]*)\s*(?:cu\.?\s*m\.?|cbm)",
+            page_text,
+            re.I,
+        )
+        if msc_tot:
+            summary_parts.append(
+                f"- **[GRAND TOTAL (CARRIER) - TRANG {page_num}]**: "
+                f"Gross Weight: {msc_tot.group(1)} KGS | Measurement: {msc_tot.group(2)} CBM"
+            )
 
     if not summary_parts:
         return page_text
