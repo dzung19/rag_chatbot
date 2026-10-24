@@ -109,7 +109,10 @@ def build_compare_context_text(
 
     # Automatically identify and assign roles
     try:
-        from compare_engine import resolve_compare_roles
+        try:
+            from compare_engine import resolve_compare_roles, build_shipping_dates_reference_banner
+        except ImportError:
+            from services.rag_engine.compare_engine import resolve_compare_roles, build_shipping_dates_reference_banner
         doc1, doc2, role_meta = resolve_compare_roles(context_chunks[0], context_chunks[1])
         is_shipping = role_meta.get("is_shipping_pair", False)
     except Exception as e:
@@ -151,7 +154,7 @@ def build_compare_context_text(
 
     if is_shipping:
         return (
-            f"=== TÀI LIỆU 1 (CHUẨN / B/L CHECK LIST): {name1} ===\n"
+            f"{(build_shipping_dates_reference_banner(text1, text2) + chr(10) + chr(10)) if is_shipping else ''}=== TÀI LIỆU 1 (CHUẨN / B/L CHECK LIST): {name1} ===\n"
             f"[VAI TRÒ: TÀI LIỆU GỐC / CHUẨN ĐỂ ĐỐI CHIẾU — B/L CHECK LIST]\n"
             f"{text1}\n"
             f"=== HẾT TÀI LIỆU 1 (B/L CHECK LIST: {name1}) ===\n\n"

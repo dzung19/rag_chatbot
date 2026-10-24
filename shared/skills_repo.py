@@ -58,11 +58,11 @@ BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, H
 - ETD HPH ON trong REQUEST ↔ ETD trên BL.
 - ETD: lấy ETD/ETD HPH của đúng cảng đi và chặng.
 - ON-BOARD DATE: lấy ngày tại Laden/Shipped on Board.
-- ISSUE DATE: lấy ngày trong vùng phát hành chứng từ.
+- ISSUE DATE (Place and Date of Issue): Chỉ lấy trên file BL tại ô `PLACE AND DATE OF ISSUE` / `Date of Issue` ở cuối trang BL (lưu ý đọc đầy đủ cả dòng tên nơi phát hành như `MSC Ha Noi` VÀ dòng ngày phát hành nằm ngay bên dưới như `14-Sep-2026` trong cùng ô). CẢNH BÁO TRÊN BL CHECK LIST: File BL Check List KHÔNG CÓ ngày `ISSUE DATE` (mục `B/L ISSUED AT` chỉ ghi nơi phát hành). Trường `DATE` ở góc trên cùng cạnh `PAGE` (ví dụ `DATE 2026.09.15` — ngày đầu tiên ở đầu trang Check List) chỉ là ngày in phiếu Check List, và `CUSTOM CLEARANCE DAY` là ngày thông quan; TUYỆT ĐỐI KHÔNG lấy trường `DATE` ở đầu trang BL Check List làm `ISSUE DATE` hay `ETD`!
 - Nhãn Date/Dated phải được xác định theo vùng chứa, không lấy ngày bất kỳ.
 - Ưu tiên đối chiếu ETD trực tiếp. Nếu BL chỉ có on-board date,
   ghi rõ đây là ngày liên quan; chỉ dùng thay ETD khi nghiệp vụ cho phép.
-- Kiểm tra ISSUE DATE = ETD riêng; không dùng issue date để điền ETD.
+- Kiểm tra ISSUE DATE = ETD (Hạng mục 18): lấy ISSUE DATE thực tế trong ô `PLACE AND DATE OF ISSUE` trên BL (ví dụ `14-Sep-2026`) đối chiếu với ETD chuẩn trên BL Check List (tại ô `ETD` / `ETD HPH ON`, ví dụ `2026.09.14` / `14 SEP 2026`). Khi trình bày dòng `18. ISSUE DATE = ETD`: cột `Dữ liệu BL Check List` ghi ETD chuẩn của Check List (`2026.09.14 / 14 SEP 2026`), cột `Dữ liệu BL` ghi Place and Date of Issue trên BL (`MSC Ha Noi, 14-Sep-2026`); nếu cùng ngày/tháng/năm thì kết luận **ĐÚNG**. Không dùng issue date để điền thay ETD ở Hạng mục 17.
 - Chuẩn hóa định dạng ngày nhưng giữ giá trị gốc và trang nguồn.
 - Nếu có ngày nhưng ánh xạ chưa rõ, kết luận KHÔNG HIỂU.
   Chỉ kết luận KHÔNG TÌM THẤY sau khi kiểm tra đủ nội dung;
@@ -83,7 +83,7 @@ BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, H
    - 4.3. Trích xuất description trên BL theo từng container, giữ nguyên mọi lần lặp.
    - 4.4. Thứ tự kiểm tra: Mỗi description chuẩn phải xuất hiện đúng 1 lần trên toàn bộ BL (0 lần → **SAI: thiếu**, >=2 lần → **SAI: trùng lặp**, ngoài danh sách chuẩn → **SAI: thừa**).
 5. **Đối chiếu toàn bộ 23 hạng mục:**
-   1. SHIPPER với dữ liệu chuẩn.(Lấy SHIPPER riêng từng file, dừng tại nhãn kế tiếp; không lấy số tiền hoặc INCOTERMS. Không coi SHIPPER lặp ở nhiều invoice là sai.) 2. CONSIGNEE. 3. NOTIFY PARTY 1. 4. NOTIFY PARTY 2. 5. DELIVERY TO. 6. CONTAINER NO. 7. SEAL NO. 8. CONTAINER TYPE. 9. P'KGS. 10. WEIGHT. 11. MEASUREMENT/M3. 12. Tổng P'KGS, WEIGHT và MEASUREMENT/M3. 13. GOODS DESCRIPTION. 14. PORT OF LOADING. 15. PORT OF DISCHARGE. 16. PLACE OF DELIVERY. 17. ETD. 18. ISSUE DATE = ETD. 19. Tổng số container + loại container. 20. Delivery term (CY-CY, CY-DOOR, CFS-CFS, CFS-DOOR). 21. SHIPMENT NO. 22. B/L REQUIRED. 23. HS code (BL không được hiển thị HS code, nếu có là **SAI**).
+   1. SHIPPER với dữ liệu chuẩn.(Lấy SHIPPER riêng từng file, dừng tại nhãn kế tiếp; không lấy số tiền hoặc INCOTERMS. Không coi SHIPPER lặp ở nhiều invoice là sai.) 2. CONSIGNEE. 3. NOTIFY PARTY 1. 4. NOTIFY PARTY 2. 5. DELIVERY TO. 6. CONTAINER NO. 7. SEAL NO. 8. CONTAINER TYPE. 9. P'KGS. 10. WEIGHT. 11. MEASUREMENT/M3. 12. Tổng P'KGS, WEIGHT và MEASUREMENT/M3. 13. GOODS DESCRIPTION. 14. PORT OF LOADING. 15. PORT OF DISCHARGE. 16. PLACE OF DELIVERY. 17. ETD (ETD trên Check List ↔ On-Board Date/ETD trên BL). 18. ISSUE DATE = ETD (ETD trên Check List ↔ Ngày phát hành trong ô PLACE AND DATE OF ISSUE trên BL; tuyệt đối không lấy trường DATE ở đầu trang Check List). 19. Tổng số container + loại container. 20. Delivery term (CY-CY, CY-DOOR, CFS-CFS, CFS-DOOR). 21. SHIPMENT NO. 22. B/L REQUIRED. 23. HS code (BL không được hiển thị HS code, nếu có là **SAI**).
 
 # Định dạng đầu ra (Báo cáo dạng Bảng Markdown)
 

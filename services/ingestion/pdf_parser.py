@@ -173,13 +173,21 @@ _BL_LABEL_ANCHORS: list[tuple[str, re.Pattern[str]]] = [
     ("Type of Movement", re.compile(r"^Type\s+of\s+Movement\b", re.I)),
     ("10. Total Number of Containers/Packages", re.compile(r"^10\.?\s*Total\s+Number\s+of\s+Containers(?:\s+and/or\s+Packages\s*\(in\s+words\))?", re.I)),
     ("Date Laden on Board / On Board Date", re.compile(r"^(?:Shipped\s+on\s+Board\s+Date|Date\s+Laden\s+on\s+Board|Laden\s+on\s+Board|Shipped\s+on\s+Board|On\s+Board\s+Date|Received\s+Date)\b", re.I)),
-    ("Date of Issue", re.compile(r"^(?:Place\s+and\s+Date\s+of\s+Issue|Date\s+of\s+Issue|Issue\s+Date)\b", re.I)),
+    ("Place and Date of Issue (Nơi & Ngày phát hành B/L)", re.compile(r"^(?:Place\s+and\s+Date\s+of\s+Issue|Date\s+of\s+Issue|Issue\s+Date)\b", re.I)),
     ("Place of Issue", re.compile(r"^Place\s+of\s+Issue\b", re.I)),
     ("Request No. / Shipment No.", re.compile(r"^(?:Request\s+No\.?|Shipment\s+No\.?|Shipment\b)", re.I)),
     ("B/L Required", re.compile(r"^B/L\s+Required\b", re.I)),
     ("From (Request)", re.compile(r"^From\b(?!\s+to\b)", re.I)),
     ("Via (Request)", re.compile(r"^Via\b", re.I)),
     ("To (Request)", re.compile(r"^To\b", re.I)),
+    ("ETD (Ngày tàu chạy dự kiến)", re.compile(r"^ETD\b(?!\s+HPH)", re.I)),
+    ("ETA (Ngày tàu đến dự kiến)", re.compile(r"^ETA\b", re.I)),
+    ("Request (Routing / ETD HPH)", re.compile(r"^REQUEST\b(?!\s*NO)", re.I)),
+    ("B/L Issued At (Nơi phát hành B/L)", re.compile(r"^B/L\s+Issued\s+At\b", re.I)),
+    ("Shipped Per (Tên tàu)", re.compile(r"^Shipped\s+Per\b", re.I)),
+    ("Voyage No.", re.compile(r"^Voyage\s+No\.?\b", re.I)),
+    ("Custom Clearance Day (Ngày thông quan)", re.compile(r"^Custom\s+Clearance\s+Day\b", re.I)),
+    ("Check List Print Date (Ngày in phiếu - Không phải Issue Date/ETD)", re.compile(r"^DATE(?:\s+PAGE)?$", re.I)),
 ]
 
 
@@ -673,6 +681,9 @@ def _extract_bl_anchor_boxes(
                         "STUFFING PLAN",
                         "ORDER NO.",
                         "===============",
+                        "SEA WAYBILL STANDARD EDITION",
+                        "TERMS CONTINUED ON REVERSE",
+                        "SEE WEBSITE FOR LARGE VERSION",
                     )
                 ):
                     bottom_candidates.append(vl.y0 - 2.0)
@@ -693,7 +704,12 @@ def _extract_bl_anchor_boxes(
 
         box_y1 = min(bottom_candidates)
         # Cap box height reasonably so a bottom label doesn't swallow the whole footer
-        max_h = 95.0 if anc["label"].startswith(("1.", "2.", "3.", "Notify")) else 42.0
+        if anc["label"].startswith(("1.", "2.", "3.", "Notify")):
+            max_h = 95.0
+        elif anc["label"].startswith(("Place and Date of Issue", "Date of Issue", "Place of Issue", "Date Laden on Board", "Request (Routing")):
+            max_h = 78.0
+        else:
+            max_h = 42.0
         box_y1 = min(box_y1, anc["y0"] + max_h)
 
         # Collect words inside [ax0, box_x1] x [ay0, box_y1]
@@ -1105,10 +1121,119 @@ def _append_shipping_structured_summary(page_text: str, page_num: int) -> str:
                 f"Gross Weight: {msc_tot.group(1)} KGS | Measurement: {msc_tot.group(2)} CBM"
             )
 
+    date_summary = _extract_page_shipping_dates_summary(page_text, page_num)
+    if date_summary:
+        summary_parts.append(date_summary)
+
     if not summary_parts:
         return page_text
 
     return page_text + "\n\n" + "\n\n".join(summary_parts)
+
+
+def _extract_page_shipping_dates_summary(page_text: str, page_num: int) -> str:
+    """Extract and disambiguate ETD, On-Board Date, Place & Date of Issue, and Check List Report Date."""
+    notes: list[str] = []
+
+    # 1. Check if this is a BL Check List page with ETD / Report Date
+    is_checklist_page = bool(re.search(r"\bB/?L\s+CHECK\s*LIST\b|\bCUSTOM\s+CLEARANCE\s+DAY\b", page_text, re.I))
+    if is_checklist_page:
+        etd_vals: list[str] = []
+        m_etd_col = re.search(
+            r"\bFROM\s*\|\s*ETD\b[^\n]*\n\s*([^\n|]+?)\s*\|\s*(\d{4}[./-]\d{2}[./-]\d{2}|\d{1,2}[-\s][A-Za-z]{3,9}[-\s]\d{4})",
+            page_text,
+            re.I,
+        )
+        if m_etd_col:
+            etd_vals.append(m_etd_col.group(2).strip())
+
+        m_etd_req = re.search(
+            r"\bETD\s+(?:[A-Z]{2,5}\s+)?ON\s+(\d{1,2}[-\s][A-Za-z]{3,9}[-\s]\d{4}|\d{4}[./-]\d{2}[./-]\d{2})",
+            page_text,
+            re.I,
+        )
+        if m_etd_req and m_etd_req.group(1).strip() not in etd_vals:
+            etd_vals.append(m_etd_req.group(1).strip())
+
+        if etd_vals:
+            notes.append(f"  - **ETD chuẩn (BL Check List)**: `{' / '.join(etd_vals)}` (Dùng để đối chiếu cả Hạng mục 17 `ETD` và Hạng mục 18 `ISSUE DATE = ETD`)")
+
+        m_rep_date = re.search(
+            r"\bSHIPPED\s+PER\s*\|\s*DATE\s*\|\s*PAGE\s*\n[^\n|]+\|\s*(\d{4}[./-]\d{2}[./-]\d{2})",
+            page_text,
+            re.I,
+        )
+        if m_rep_date:
+            notes.append(
+                f"  - **Ngày in phiếu Check List (`DATE` cạnh `PAGE`)**: `{m_rep_date.group(1).strip()}` "
+                "(LƯU Ý: Đây chỉ là ngày xuất phiếu Check List, **KHÔNG PHẢI** là Issue Date / Place of Issue và **KHÔNG PHẢI** ETD)"
+            )
+
+    # 2. Check if this page has BL Place and Date of Issue or Shipped on Board Date
+    date_token_re = re.compile(
+        r"\b(\d{1,2}[-\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-\s]+\d{4}|\d{4}[./-]\d{2}[./-]\d{2})\b",
+        re.I,
+    )
+
+    # Check inline "Date of Issue <date> Place of Issue <place>"
+    m_inline_issue = re.search(
+        r"\bDate\s+of\s+Issue\s+(\d{1,2}[-\s]+[A-Za-z]{3,9}[-\s]+\d{4}|\d{4}[./-]\d{2}[./-]\d{2})(?:\s*\|\s*|\s+)Place\s+of\s+Issue\s+([^\n|]+)",
+        page_text,
+        re.I,
+    )
+    if m_inline_issue:
+        notes.append(
+            f"  - **PLACE AND DATE OF ISSUE (trên BL)**: Nơi phát hành = `{m_inline_issue.group(2).strip()}` | "
+            f"**ISSUE DATE = `{m_inline_issue.group(1).strip()}`**"
+        )
+    else:
+        # Check multi-line box around PLACE AND DATE OF ISSUE
+        m_box_issue = re.search(
+            r"PLACE\s+AND\s+DATE\s+OF\s+ISSUE([^\n]*)\n((?:[^\n]+\n?){1,4})",
+            page_text,
+            re.I,
+        )
+        if m_box_issue:
+            window_lines = [ln.strip() for ln in m_box_issue.group(2).splitlines() if ln.strip()]
+            left_col_tokens: list[str] = []
+            for ln in window_lines[:3]:
+                if re.search(r"Sea\s+Waybill\s+Standard|TERMS\s+CONTINUED|See\s+website", ln, re.I):
+                    break
+                first_col = ln.split("|")[0].strip()
+                if first_col:
+                    left_col_tokens.append(first_col)
+            joined_left = " | ".join(left_col_tokens)
+            found_dates = date_token_re.findall(joined_left)
+            if found_dates:
+                issue_dt = found_dates[-1].strip()
+                place_part = date_token_re.sub("", joined_left).replace("|", " ").strip(" ,;:-")
+                notes.append(
+                    f"  - **PLACE AND DATE OF ISSUE (trên BL)**: Nơi phát hành = `{place_part or 'N/A'}` | "
+                    f"**ISSUE DATE = `{issue_dt}`** (Dùng để đối chiếu Hạng mục 18 `ISSUE DATE = ETD`)"
+                )
+
+    # Check Shipped on Board / Laden on Board date on BL
+    m_onboard = re.search(
+        r"(?:SHIPPED\s+ON\s+BOARD\s+DATE|Date\s+Laden\s+on\s+Board)\s*(?:\|\s*)?(\d{1,2}[-\s]+[A-Za-z]{3,9}[-\s]+\d{4}|\d{4}[./-]\d{2}[./-]\d{2})?",
+        page_text,
+        re.I,
+    )
+    if m_onboard:
+        ob_date = (m_onboard.group(1) or "").strip()
+        if not ob_date:
+            tail = page_text[m_onboard.end() : m_onboard.end() + 260]
+            ob_matches = date_token_re.findall(tail)
+            if ob_matches:
+                ob_date = ob_matches[0].strip()
+        if ob_date:
+            notes.append(
+                f"  - **ON-BOARD DATE (`SHIPPED ON BOARD DATE` / `Date Laden on Board` trên BL)**: **`{ob_date}`** "
+                "(Dùng để đối chiếu Hạng mục 17 `ETD`)"
+            )
+
+    if not notes:
+        return ""
+    return f"### [TÓM TẮT NGÀY THÁNG ĐỐI CHIẾU (ETD / ON-BOARD / ISSUE DATE) - TRANG {page_num}]\n" + "\n".join(notes)
 
 
 # ---------------------------------------------------------------------------

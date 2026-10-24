@@ -236,3 +236,184 @@ def resolve_compare_roles(
     )
 
     return doc_checklist, doc_bl, meta
+
+
+_MONTH_MAP: dict[str, int] = {
+    "JAN": 1, "JANUARY": 1,
+    "FEB": 2, "FEBRUARY": 2,
+    "MAR": 3, "MARCH": 3,
+    "APR": 4, "APRIL": 4,
+    "MAY": 5,
+    "JUN": 6, "JUNE": 6,
+    "JUL": 7, "JULY": 7,
+    "AUG": 8, "AUGUST": 8,
+    "SEP": 9, "SEPT": 9, "SEPTEMBER": 9,
+    "OCT": 10, "OCTOBER": 10,
+    "NOV": 11, "NOVEMBER": 11,
+    "DEC": 12, "DECEMBER": 12,
+}
+
+_DATE_TOKEN_RE = re.compile(
+    r"\b(\d{1,2}[-\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*[-\s]+\d{4}|\d{4}[./-]\d{2}[./-]\d{2})\b",
+    re.I,
+)
+
+
+def normalize_shipping_date(raw_date: str) -> Optional[str]:
+    """Normalize shipping date strings (e.g. '2026.09.14', '14 SEP 2026', '14-Sep-2026') to 'YYYY-MM-DD'."""
+    if not raw_date:
+        return None
+    s = raw_date.strip()
+    m_ymd = re.match(r"^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$", s)
+    if m_ymd:
+        return f"{int(m_ymd.group(1)):04d}-{int(m_ymd.group(2)):02d}-{int(m_ymd.group(3)):02d}"
+
+    m_dmy = re.match(r"^(\d{1,2})[-\s]+([A-Za-z]+)[-\s]+(\d{4})$", s)
+    if m_dmy:
+        day = int(m_dmy.group(1))
+        mon_str = m_dmy.group(2).upper()
+        year = int(m_dmy.group(3))
+        mon = _MONTH_MAP.get(mon_str) or _MONTH_MAP.get(mon_str[:3])
+        if mon:
+            return f"{year:04d}-{mon:02d}-{day:02d}"
+    return None
+
+
+def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> str:
+    """Extract and cross-check ETD, On-Board Date, and Place/Date of Issue between Checklist and BL.
+
+    Prevents the LLM from mistaking the Checklist's top-right print 'DATE' (next to 'PAGE 1')
+    for the B/L Issue Date or overlooking the second line of 'PLACE AND DATE OF ISSUE' on the BL.
+    """
+    lines: list[str] = [
+        "=== BẢNG THAM CHIẾU NGÀY THÁNG ĐÃ BÓC TÁCH TỰ ĐỘNG (DÙNG CHO HẠNG MỤC 17 & 18) ==="
+    ]
+
+    # 1. Extract ETD and Report Date from B/L Check List
+    cl_etd_raw: list[str] = []
+    m_etd_box = re.search(r"\*\*ETD[^*]*\*\*:\s*([^\n|]+)", checklist_text, re.I)
+    if m_etd_box:
+        for d in _DATE_TOKEN_RE.findall(m_etd_box.group(1)):
+            if d not in cl_etd_raw:
+                cl_etd_raw.append(d.strip())
+
+    m_etd_col = re.search(
+        r"\bFROM\s*\|\s*ETD\b[^\n]*\n\s*([^\n|]+?)\s*\|\s*(\d{4}[./-]\d{2}[./-]\d{2}|\d{1,2}[-\s][A-Za-z]{3,9}[-\s]\d{4})",
+        checklist_text,
+        re.I,
+    )
+    if m_etd_col and m_etd_col.group(2).strip() not in cl_etd_raw:
+        cl_etd_raw.append(m_etd_col.group(2).strip())
+
+    m_etd_req = re.search(
+        r"\bETD\s+(?:[A-Z]{2,5}\s+)?ON\s+(\d{1,2}[-\s]+[A-Za-z]{3,9}[-\s]+\d{4}|\d{4}[./-]\d{2}[./-]\d{2})",
+        checklist_text,
+        re.I,
+    )
+    if m_etd_req and m_etd_req.group(1).strip() not in cl_etd_raw:
+        cl_etd_raw.append(m_etd_req.group(1).strip())
+
+    cl_etd_iso = normalize_shipping_date(cl_etd_raw[0]) if cl_etd_raw else None
+    if cl_etd_raw:
+        lines.append(
+            f"- **[BL CHECK LIST] ETD chuẩn**: `{' / '.join(cl_etd_raw)}` "
+            f"(Chuẩn hóa: `{cl_etd_iso or cl_etd_raw[0]}`)"
+        )
+
+    m_cl_print_date = re.search(
+        r"\bSHIPPED\s+PER\s*\|\s*DATE\s*\|\s*PAGE\s*\n[^\n|]+\|\s*(\d{4}[./-]\d{2}[./-]\d{2})",
+        checklist_text,
+        re.I,
+    )
+    if m_cl_print_date:
+        lines.append(
+            f"- **[BL CHECK LIST] Cảnh báo trường `DATE` cạnh `PAGE`**: `{m_cl_print_date.group(1).strip()}` "
+            "chỉ là **Ngày in/xuất phiếu Check List** (và `CUSTOM CLEARANCE DAY` là ngày thông quan) — "
+            "**TUYỆT ĐỐI KHÔNG** lấy làm `ISSUE DATE` (Place and Date of Issue) hay `ETD`!"
+        )
+
+    # 2. Extract Place and Date of Issue & On-Board Date from BL
+    bl_issue_place = ""
+    bl_issue_date = ""
+
+    m_inline_issue = re.search(
+        r"\bDate\s+of\s+Issue\s+(\d{1,2}[-\s]+[A-Za-z]{3,9}[-\s]+\d{4}|\d{4}[./-]\d{2}[./-]\d{2})(?:\s*\|\s*|\s+)Place\s+of\s+Issue\s+([^\n|]+)",
+        bl_text,
+        re.I,
+    )
+    if m_inline_issue:
+        bl_issue_date = m_inline_issue.group(1).strip()
+        bl_issue_place = m_inline_issue.group(2).strip()
+    else:
+        for m_box in re.finditer(
+            r"PLACE\s+AND\s+DATE\s+OF\s+ISSUE([^\n]*)\n((?:[^\n]+\n?){1,4})",
+            bl_text,
+            re.I,
+        ):
+            window_lines = [ln.strip() for ln in m_box.group(2).splitlines() if ln.strip()]
+            left_parts: list[str] = []
+            for ln in window_lines[:3]:
+                if re.search(r"Sea\s+Waybill\s+Standard|TERMS\s+CONTINUED|See\s+website|###", ln, re.I):
+                    break
+                first_col = ln.split("|")[0].strip()
+                if first_col:
+                    left_parts.append(first_col)
+            joined_left = " | ".join(left_parts)
+            found_dates = _DATE_TOKEN_RE.findall(joined_left)
+            if found_dates:
+                bl_issue_date = found_dates[-1].strip()
+                bl_issue_place = _DATE_TOKEN_RE.sub("", joined_left).replace("|", " ").strip(" ,;:-")
+                break
+
+    bl_issue_iso = normalize_shipping_date(bl_issue_date)
+    if bl_issue_date:
+        lines.append(
+            f"- **[BL / SEA WAYBILL] PLACE AND DATE OF ISSUE (Nơi & Ngày phát hành BL)**: "
+            f"Nơi phát hành = `{bl_issue_place or 'N/A'}` | **ISSUE DATE = `{bl_issue_date}`** "
+            f"(Chuẩn hóa: `{bl_issue_iso or bl_issue_date}`)"
+        )
+
+    bl_onboard_date = ""
+    m_ob_box = re.search(r"\*\*Date Laden on Board / On Board Date\*\*:\s*([^\n]+)", bl_text, re.I)
+    if m_ob_box:
+        ob_d = _DATE_TOKEN_RE.findall(m_ob_box.group(1))
+        if ob_d:
+            bl_onboard_date = ob_d[0].strip()
+    if not bl_onboard_date:
+        m_ob = re.search(
+            r"(?:SHIPPED\s+ON\s+BOARD\s+DATE|Date\s+Laden\s+on\s+Board)[^\n]*\n((?:[^\n]+\n?){1,3})",
+            bl_text,
+            re.I,
+        )
+        if m_ob:
+            ob_d = _DATE_TOKEN_RE.findall(m_ob.group(1))
+            if ob_d:
+                bl_onboard_date = ob_d[0].strip()
+
+    bl_onboard_iso = normalize_shipping_date(bl_onboard_date)
+    if bl_onboard_date:
+        lines.append(
+            f"- **[BL / SEA WAYBILL] ON-BOARD DATE (`SHIPPED ON BOARD DATE` / `Date Laden on Board`)**: "
+            f"**`{bl_onboard_date}`** (Chuẩn hóa: `{bl_onboard_iso or bl_onboard_date}`)"
+        )
+
+    # 3. Pre-verified comparison summary for Items 17 & 18
+    if cl_etd_iso and bl_onboard_iso:
+        verdict_17 = "**ĐÚNG** (Cùng ngày)" if cl_etd_iso == bl_onboard_iso else "**SAI** (Khác ngày)"
+        lines.append(
+            f"- **[ĐỐI CHIẾU HẠNG MỤC 17 — ETD]**: "
+            f"BL Check List (`{' / '.join(cl_etd_raw)}`) ↔ BL On-Board Date (`{bl_onboard_date}`) => {verdict_17}"
+        )
+    if cl_etd_iso and bl_issue_iso:
+        verdict_18 = "**ĐÚNG** (Cùng ngày)" if cl_etd_iso == bl_issue_iso else "**SAI** (Khác ngày)"
+        place_prefix = f"{bl_issue_place}, " if bl_issue_place else ""
+        lines.append(
+            f"- **[ĐỐI CHIẾU HẠNG MỤC 18 — ISSUE DATE = ETD]**: "
+            f"Dữ liệu BL Check List (ETD: `{' / '.join(cl_etd_raw)}`) ↔ "
+            f"Dữ liệu BL (Place and Date of Issue: `{place_prefix}{bl_issue_date}`) => {verdict_18}"
+        )
+
+    if len(lines) == 1:
+        return ""
+    lines.append("===================================================================================")
+    return "\n".join(lines)
