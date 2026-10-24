@@ -469,7 +469,7 @@ async def query_stream(request: ChatRequest):
                     messages=messages,
                     temperature=temperature,
                     num_predict=(
-                        2048
+                        4096
                         if request.skill_id == "business-compare"
                         else 1024
                     ),
