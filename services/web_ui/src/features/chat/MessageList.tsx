@@ -36,35 +36,40 @@ export const MessageList: React.FC<MessageListProps> = ({
     if (isNearBottom || isStreaming) {
       scrollToBottom(false);
     }
+
+    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setShowScrollBtn(distanceToBottom > 150);
   }, [messages, isStreaming]);
 
   const handleScroll = () => {
     const el = scrollAreaRef.current;
     if (!el) return;
     const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    setShowScrollBtn(distanceToBottom > 200);
+    setShowScrollBtn(distanceToBottom > 150);
   };
 
   return (
-    <div
-      ref={scrollAreaRef}
-      className={styles.scrollArea}
-      onScroll={handleScroll}
-    >
-      <div className={styles.messagesInner}>
-        {messages.map((message, index) =>
-          message.role === "user" ? (
-            <UserMessage key={message.id} message={message} />
-          ) : (
-            <AssistantMessage
-              key={message.id}
-              conversationId={conversationId}
-              message={message}
-              isStreaming={isStreaming && index === messages.length - 1}
-            />
-          )
-        )}
-        <div ref={bottomAnchorRef} />
+    <div className={styles.container}>
+      <div
+        ref={scrollAreaRef}
+        className={styles.scrollArea}
+        onScroll={handleScroll}
+      >
+        <div className={styles.messagesInner}>
+          {messages.map((message, index) =>
+            message.role === "user" ? (
+              <UserMessage key={message.id} message={message} />
+            ) : (
+              <AssistantMessage
+                key={message.id}
+                conversationId={conversationId}
+                message={message}
+                isStreaming={isStreaming && index === messages.length - 1}
+              />
+            )
+          )}
+          <div ref={bottomAnchorRef} />
+        </div>
       </div>
 
       {showScrollBtn && (

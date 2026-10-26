@@ -17,6 +17,11 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content }) => 
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          table: ({ children, ...props }) => (
+            <div className={styles.tableWrapper}>
+              <table {...props}>{children}</table>
+            </div>
+          ),
           a: ({ ...props }) => (
             <a {...props} target="_blank" rel="noopener noreferrer" />
           ),

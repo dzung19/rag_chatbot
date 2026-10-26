@@ -57,23 +57,59 @@
   font-style: italic;
 }
 
+.tableWrapper {
+  width: 100%;
+  overflow-x: auto;
+  margin: 1.25rem 0;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-default);
+  background-color: var(--surface-card);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  -webkit-overflow-scrolling: touch;
+}
+
+.tableWrapper table,
 .markdown table {
   width: 100%;
   border-collapse: collapse;
-  margin: 1rem 0;
+  margin: 0;
   font-size: var(--text-sm);
+  line-height: 1.5;
+  word-break: normal;
 }
 
+.tableWrapper th,
+.tableWrapper td,
 .markdown th,
 .markdown td {
   border: 1px solid var(--border-default);
-  padding: 0.6rem 0.85rem;
+  padding: 0.65rem 0.85rem;
   text-align: left;
+  vertical-align: top;
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 
+.tableWrapper th,
 .markdown th {
-  background-color: var(--surface-card);
+  background-color: var(--surface-hover);
   font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.tableWrapper th:first-child,
+.tableWrapper td:first-child,
+.markdown th:first-child,
+.markdown td:first-child {
+  text-align: center;
+  white-space: nowrap;
+  width: 48px;
+}
+
+.tableWrapper tbody tr:hover,
+.markdown tbody tr:hover {
+  background-color: var(--surface-hover);
 }
 
 .codeBlockWrapper {
