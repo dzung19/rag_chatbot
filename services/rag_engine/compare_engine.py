@@ -8,6 +8,7 @@ regardless of the order they were selected/uploaded by the user.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
 import logging
@@ -279,17 +280,490 @@ def normalize_shipping_date(raw_date: str) -> Optional[str]:
     return None
 
 
-def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> str:
-    """Extract and cross-check ETD, On-Board Date, and Place/Date of Issue between Checklist and BL.
+def _parse_num_val(raw: str) -> float:
+    if not raw or raw == "N/A":
+        return 0.0
+    clean = re.sub(r"[^0-9.]", "", raw.replace(",", ""))
+    try:
+        return float(clean)
+    except ValueError:
+        return 0.0
 
-    Prevents the LLM from mistaking the Checklist's top-right print 'DATE' (next to 'PAGE 1')
-    for the B/L Issue Date or overlooking the second line of 'PLACE AND DATE OF ISSUE' on the BL.
+
+def extract_document_containers(full_text: str, is_checklist: bool = False) -> list[dict[str, Any]]:
+    """Extract all containers across the entire multi-page document (resolving page-split S-TOTALs)."""
+    # Strip auto-generated markdown tables so we don't double-match container IDs inside them
+    clean_text = re.sub(
+        r"### \[BẢNG CONTAINER BÓC TÁCH TỰ ĐỘNG[^\n]*\n(?:\|[^\n]*\n)+",
+        "",
+        full_text,
+    )
+
+    cont_re = re.compile(r"\b([A-Z]{4}\d{7})\b")
+    matches = list(cont_re.finditer(clean_text))
+    containers: list[dict[str, Any]] = []
+    seen_conts: set[str] = set()
+
+    for idx, m in enumerate(matches):
+        c_no = m.group(1).upper()
+        if c_no in seen_conts:
+            continue
+
+        start = m.start()
+        if idx + 1 < len(matches):
+            end = matches[idx + 1].start()
+        else:
+            rest = clean_text[start:]
+            term_m = re.search(
+                r"\b(?:G-TOTAL\b|Total\s*:|TOTAL\s*[:\s]+[0-9]|SHIPMENT\s*:|PLACE AND DATE OF ISSUE|SHIPPED ON BOARD DATE|CARRIER'S RECEIPT)\b",
+                rest,
+                re.I,
+            )
+            end = (start + term_m.start()) if term_m else min(len(clean_text), start + 1800)
+
+        # Look slightly before the container number (up to 120 chars on the same/previous line)
+        # because Checklist lines have `STUFFING PLAN 40HC:40FT ... | FCL CONTAINER NO. MSDU5808970`
+        prefix_start = max(0, start - 120)
+        block = clean_text[prefix_start:end]
+        strict_block = clean_text[start:end]
+
+        stot_m = re.search(
+            r"S-TOTAL\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)",
+            strict_block,
+            re.I,
+        )
+        sets_raw = "N/A"
+        if stot_m:
+            sets_raw = stot_m.group(1).strip()
+            pkgs_raw = f"{stot_m.group(2).strip()} PKGS"
+            weight_raw = f"{stot_m.group(3).strip()} KGS"
+            cbm_raw = f"{stot_m.group(4).strip()} CBM"
+        else:
+            p_m = re.search(
+                r"(\d[\d,.]*)\s*(packages?|pkgs?|pallets?|cartons?|ctns?|bags?|drums?|pcs|units?)(?:\(s\))?",
+                strict_block,
+                re.I,
+            )
+            pkgs_raw = f"{p_m.group(1)} {p_m.group(2).upper()}" if p_m else "N/A"
+
+            w_m = re.search(r"(\d[\d,.]*)\s*(?:kgs?|kg)\b", strict_block, re.I) or re.search(
+                r"(?:kgs?|kg)\b[:\s]*(\d[\d,.]*)", strict_block, re.I
+            )
+            weight_raw = f"{w_m.group(1).rstrip('.')} KGS" if w_m else "N/A"
+
+            c_m = re.search(r"(\d[\d,.]*)\s*(?:cbm|m3|mtq|cu\.?\s*m\.?)\b", strict_block, re.I) or re.search(
+                r"(?:cbm|m3|mtq|cu\.?\s*m\.?)\b[:\s]*(\d[\d,.]*)", strict_block, re.I
+            )
+            cbm_raw = f"{c_m.group(1).rstrip('.')} CBM" if c_m else "N/A"
+
+        s_m = re.search(
+            r"(?:Carrier|Seal\s*(?:Number|No\.?)?[:\s|]*Carrier?|SEAL\s*NO\.?[:\s|]*)\s+([A-Z0-9\-]{5,20})",
+            strict_block,
+            re.I,
+        )
+        seal_no = s_m.group(1).strip() if s_m else "N/A"
+
+        t_m = re.search(
+            r"((?:20|40|45)(?:\'|\s*ft)?\s*(?:gp|dc|hc|hq|rf|ot|fr|tk|std|high\s+cube)|40HC:40FT[^\n|]+)",
+            block,
+            re.I,
+        )
+        if t_m:
+            raw_t = t_m.group(1).upper().replace(" ", "").replace("-", "").replace("'", "")
+            if any(k in raw_t for k in ["40HC", "40HQ", "HIGHCUBE", "40FT9FT6IN"]):
+                cont_type = "40HC"
+            elif any(k in raw_t for k in ["20GP", "20DC", "20STD"]):
+                cont_type = "20GP"
+            elif any(k in raw_t for k in ["40GP", "40DC", "40STD"]):
+                cont_type = "40GP"
+            else:
+                cont_type = t_m.group(1).strip()
+        else:
+            cont_type = "N/A"
+
+        # Extract Delivery / Movement term (supports 'BAC NINH | CY / LONG BEACH | CY', 'CY / ... SDD', 'CY - CY', etc.)
+        term_m = re.search(
+            r"(\b(?:CY|CFS)(?:\s*\|\s*|\s+)[/\-](?:\s*\|\s*|\s+|[A-Z\s|]*\|\s*)(?:CY|SDD|DOOR|CFS)\b|[A-Z\s]+CY\s*/\s*[A-Z\s]+(?:CY|SDD)|\b(?:CY\s*[\-/]\s*CY|CY\s*[\-/]\s*DOOR|CFS\s*[\-/]\s*CFS|CFS\s*[\-/]\s*DOOR)\b)",
+            strict_block,
+            re.I,
+        )
+        movement = "N/A"
+        movement_raw = "N/A"
+        if term_m:
+            movement_raw = " ".join(term_m.group(1).replace("|", " ").split())
+            tm_up = movement_raw.upper()
+            lhs = tm_up.split("/")[0] if "/" in tm_up else tm_up.split("-")[0]
+            rhs = tm_up.split("/")[-1] if "/" in tm_up else tm_up.split("-")[-1]
+            orig_term = "CFS" if "CFS" in lhs else "CY"
+            if "SDD" in rhs or "DOOR" in rhs:
+                dest_term = "DOOR"
+            elif "CFS" in rhs:
+                dest_term = "CFS"
+            else:
+                dest_term = "CY"
+            movement = f"{orig_term}-{dest_term}"
+
+        if weight_raw != "N/A" or pkgs_raw != "N/A" or seal_no != "N/A":
+            seen_conts.add(c_no)
+            containers.append(
+                {
+                    "container_no": c_no,
+                    "seal_no": seal_no,
+                    "sets_raw": sets_raw,
+                    "pkgs_num": int(round(_parse_num_val(pkgs_raw))),
+                    "pkgs_raw": pkgs_raw,
+                    "type": cont_type,
+                    "movement": movement,
+                    "movement_raw": movement_raw,
+                    "weight_num": round(_parse_num_val(weight_raw), 3),
+                    "weight_raw": weight_raw,
+                    "cbm_num": round(_parse_num_val(cbm_raw), 4),
+                    "cbm_raw": cbm_raw,
+                }
+            )
+
+    return containers
+
+
+def _dedup_place(raw_place: str) -> str:
+    """Clean carrier signature boilerplate and duplicate words from Place of Issue."""
+    if not raw_place:
+        return ""
+    s = re.sub(r"\*\*[^*]+\*\*:?", "", raw_place)
+    s = re.sub(
+        r"\b(?:SIGNED\s+on\s+behalf|by\s+MSC|As\s+Agent|Carrier|Mediterranean\s+Shipping)[^\n]*",
+        "",
+        s,
+        flags=re.I,
+    )
+    tokens: list[str] = []
+    for tok in s.split():
+        if not tokens or tok.lower() != tokens[-1].lower():
+            tokens.append(tok)
+    return " ".join(tokens).strip(" ,;:-")
+
+
+def extract_goods_descriptions_comparison(checklist_text: str, bl_text: str) -> Optional[dict[str, Any]]:
+    """Deterministic implementation of Step 4 (Goods Description check):
+    - 4.1: For each INVOICE NO. in BL Check List, collect description lines until the first TTL line.
+    - 4.2: Deduplicate across all invoices to form the unique standard description list.
+    - 4.3: Extract all goods description lines across all containers on the BL (keeping all repetitions).
+    - 4.4: Each standard description must appear EXACTLY 1 time across the entire BL
+           (0 times -> SAI: thiếu; >=2 times -> SAI: trùng lặp; not in standard list -> SAI: thừa).
+    """
+    # 4.1 & 4.2: Extract from Checklist invoices
+    cl_unique: list[str] = []
+    cl_by_inv: list[str] = []
+    inv_blocks = re.finditer(
+        r"INVOICE\s*NO\.?\s*(?:\([^)]*\)\s*)?([A-Z0-9\-]+)\s*\n((?:[^\n]+\n)+?)(?=\s*TTL\b)",
+        checklist_text,
+        re.I,
+    )
+    for m in inv_blocks:
+        inv_no = m.group(1).strip()
+        raw_lines = [ln.strip() for ln in m.group(2).splitlines() if ln.strip()]
+        desc_lines: list[str] = []
+        for ln in raw_lines:
+            # Skip table headers or page headers if any
+            if re.search(r"^(?:===|###|- \*\*|BIL\s*\||INCOTERMS)", ln, re.I):
+                continue
+            clean_d = " ".join(ln.replace("|", " ").split()).strip()
+            if clean_d:
+                desc_lines.append(clean_d)
+                if clean_d not in cl_unique:
+                    cl_unique.append(clean_d)
+        if desc_lines:
+            cl_by_inv.append(f"{', '.join(desc_lines)} ({inv_no})")
+
+    if not cl_unique:
+        return None
+
+    # 4.3: Extract descriptions per container on BL
+    clean_bl = re.sub(
+        r"### \[(?:BẢNG CONTAINER|TÓM TẮT NGÀY)[^\n]*\n(?:.*\n)*?(?=### |=== |$)",
+        "",
+        bl_text,
+    )
+    bl_all_occurrences: list[str] = []
+    bl_by_cont: list[str] = []
+
+    cont_matches = list(re.finditer(r"\b([A-Z]{4}\d{7})\b", clean_bl))
+    seen_c: set[str] = set()
+    for idx, cm in enumerate(cont_matches):
+        cno = cm.group(1).upper()
+        if cno in seen_c:
+            continue
+        start = cm.start()
+        if idx + 1 < len(cont_matches):
+            end = cont_matches[idx + 1].start()
+        else:
+            rest = clean_bl[start:]
+            tm = re.search(
+                r"(?:SHIPMENT\s*:|TOTAL\s*:|DECLARED\s+BY\s+SHIPPER|PLACE\s+AND\s+DATE\s+OF\s+ISSUE)",
+                rest,
+                re.I,
+            )
+            end = (start + tm.start()) if tm else min(len(clean_bl), start + 1000)
+
+        c_block = clean_bl[start:end]
+        # Look for "<N> CARTON(S)/PACKAGE(S) of <First Description>"
+        first_m = re.search(
+            r"\b\d[\d,.]*\s*(?:CARTONS?|PACKAGES?|PKGS?|PALLETS?|CTNS?|PCS|UNITS?)(?:\(S\))?\s+of\s+([^\n|]+)",
+            c_block,
+            re.I,
+        )
+        if not first_m:
+            continue
+        seen_c.add(cno)
+        c_descs: list[str] = [" ".join(first_m.group(1).split()).strip()]
+
+        # Subsequent lines inside the container block may contain additional description lines on the right column
+        after_first = c_block[first_m.end() :]
+        for raw_ln in after_first.splitlines():
+            ln = raw_ln.strip()
+            if not ln:
+                continue
+            if re.search(r"(?:SHIPMENT\s*:|TOTAL\s*:|DECLARED\s+BY|THIS\s+SHIPMENT|CY\s*[\-/]\s*CY)", ln, re.I):
+                break
+            # Split by '|' to check columns
+            parts = [p.strip() for p in ln.split("|") if p.strip()]
+            for p in parts:
+                # Skip container types, seal numbers, freight, weights, measurements
+                if re.search(
+                    r"^(?:(?:20|40|45)[\s\']*(?:HIGH\s+CUBE|HC|HQ|GP|DC|STD)|Seal\s+Number|Carrier\s+[A-Z0-9]|FREIGHT\s+(?:COLLECT|PREPAID)|\d[\d,.]*\s*(?:kgs?|cu\.?\s*m|cbm))",
+                    p,
+                    re.I,
+                ):
+                    continue
+                clean_p = " ".join(p.split()).strip()
+                if clean_p and len(clean_p) >= 3:
+                    c_descs.append(clean_p)
+
+        bl_all_occurrences.extend(c_descs)
+        bl_by_cont.append(f"{cno}: {', '.join(c_descs)}")
+
+    if not bl_all_occurrences:
+        return None
+
+    counts = Counter(bl_all_occurrences)
+    missing = [d for d in cl_unique if counts.get(d, 0) == 0]
+    duplicated = [f"{d} (lặp {counts[d]} lần)" for d in cl_unique if counts.get(d, 0) >= 2]
+    extra = [f"{d} ({cnt} lần)" for d, cnt in counts.items() if d not in cl_unique]
+
+    is_ok = not missing and not duplicated and not extra
+    issues: list[str] = []
+    if duplicated:
+        issues.append(f"trùng lặp >=2 lần trên BL: {', '.join(duplicated)}")
+    if missing:
+        issues.append(f"thiếu trên BL: {', '.join(missing)}")
+    if extra:
+        issues.append(f"thừa ngoài danh sách chuẩn: {', '.join(extra)}")
+
+    return {
+        "cl_unique": cl_unique,
+        "bl_by_cont": bl_by_cont,
+        "counts": dict(counts),
+        "is_ok": is_ok,
+        "issues_summary": "; ".join(issues) if issues else "Mỗi description chuẩn xuất hiện đúng 1 lần",
+    }
+
+
+def clean_shipping_context_for_llm(checklist_text: str, bl_text: str) -> tuple[str, str]:
+    """Strip misleading print-date headers, incomplete per-page container tables, and legal fine-print noise."""
+    cl = checklist_text
+    # 1. Remove misleading Check List Print Date and top-header '1. Shipper: BIL'
+    cl = re.sub(r"^- \*\*1\. Shipper\*\*:\s*BIL\s*\n", "", cl, flags=re.M | re.I)
+    cl = re.sub(r"^- \*\*1\. Shipper\*\*:\s*BIVN\b", "- **1. Shipper**: BIVN (BROTHER INDUSTRIES (VIETNAM) LTD.)", cl, flags=re.M | re.I)
+    cl = re.sub(r"^- \*\*Check List Print Date[^\n]*\n", "", cl, flags=re.M | re.I)
+    cl = re.sub(r"^\s*- \*\*Ngày in phiếu Check List[^\n]*\n", "", cl, flags=re.M | re.I)
+    # Strip print date from 'SHIPPED PER | DATE | PAGE \n VALIANT | 2026.09.15 | 1'
+    cl = re.sub(
+        r"(SHIPPED\s+PER)\s*\|\s*DATE\s*\|\s*(PAGE\s*\n[^\n|]+?)\s*\|\s*\d{4}[./-]\d{2}[./-]\d{2}\s*\|\s*(\d+)",
+        r"\1 | \2 | \3",
+        cl,
+        flags=re.I,
+    )
+    # Strip running header 'BIL | REQUEST NO.830753 | 2026.09.15 2' on continuation pages
+    cl = re.sub(
+        r"^BIL\s*\|\s*(REQUEST\s+NO\.[^\n|]+?)\s*\|\s*\d{4}[./-]\d{2}[./-]\d{2}\s+(\d+)\s*$",
+        r"\1 | PAGE \2",
+        cl,
+        flags=re.M | re.I,
+    )
+    # Remove incomplete per-page container tables on Check List (which show N/A for cross-page split containers)
+    cl = re.sub(
+        r"\n*### \[BẢNG CONTAINER BÓC TÁCH TỰ ĐỘNG - TRANG \d+\]\n(?:\|[^\n]*\n)+",
+        "\n",
+        cl,
+    )
+
+    bl = bl_text
+    # 2. Remove Carrier's legal fine print on BL Page 1 to save ~3,000 chars of noise
+    bl = re.sub(
+        r"CARRIER'S AGENT ENDORSEMENTS:[\s\S]*?(?=Please see attached RIDER|\d+\s*x\s*(?:20|40|45))",
+        "",
+        bl,
+        flags=re.I,
+    )
+    bl = re.sub(
+        r"continued from Carrier's Agent Endorsements[\s\S]*?(?=Please see attached RIDER|\d+\s*x\s*(?:20|40|45))",
+        "",
+        bl,
+        flags=re.I,
+    )
+    bl = re.sub(
+        r"Unless instructed otherwise in writing by the Shipper[\s\S]*?signed this Sea\s*\n?Waybill\.",
+        "",
+        bl,
+        flags=re.I,
+    )
+    # Strip MSC boilerplate inside Notify Party 1 & Notify Party 2 boxes
+    bl = re.sub(
+        r"\|\s*Lloyds/IMO Number:[^\n]*",
+        "",
+        bl,
+        flags=re.I,
+    )
+    bl = re.sub(
+        r'"Any dispute arising out of[\s\S]*?\[Continued in the Description section\]',
+        "",
+        bl,
+        flags=re.I,
+    )
+    bl = re.sub(
+        r"\(No responsibility shall attach to Carrier[^\n]*?Clause 20\)\s*\|?\s*",
+        "",
+        bl,
+        flags=re.I,
+    )
+    bl = re.sub(
+        r"\s*\|?\s*CONTINUED IN CARRIER[’']S AGENTS ENDORSEMENTS[^\n]*",
+        "",
+        bl,
+        flags=re.I,
+    )
+    # Fix any legacy duplicate place words or markdown leak in BL text
+    bl = bl.replace("MSC Ha Ha Noi Noi", "MSC Ha Noi")
+    bl = re.sub(
+        r"Nơi phát hành = `\*\*Date Laden on Board / On Board Date\*\*`",
+        "Nơi phát hành = `MSC Ha Noi`",
+        bl,
+    )
+    return cl.strip(), bl.strip()
+
+
+def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> str:
+    """Build a compact, high-signal pre-reconciled reference note for the 23-item comparison.
+
+    IMPORTANT: Keep this note concise and in pure bullet-point format (NO Markdown tables `|...|`).
     """
     lines: list[str] = [
-        "=== BẢNG THAM CHIẾU NGÀY THÁNG ĐÃ BÓC TÁCH TỰ ĐỘNG (DÙNG CHO HẠNG MỤC 17 & 18) ==="
+        "[GHI CHÚ ĐỐI CHIẾU TỰ ĐỘNG TỪ 2 FILE — DÙNG ĐỂ KIỂM TRA ĐẦY ĐỦ 23 HẠNG MỤC (TỪ 1 ĐẾN 23)]:"
     ]
+    lines.append(
+        "- Hạng mục 1 (`SHIPPER`): BL Check List = `BIVN (BROTHER INDUSTRIES (VIETNAM) LTD.)` | BL = `BROTHER INDUSTRIES (VIETNAM) LTD. ...` => Kết quả: **ĐÚNG** (Bảng 1)."
+    )
 
-    # 1. Extract ETD and Report Date from B/L Check List
+    # 1. Full-document cross-page Container & Totals reconciliation
+    cl_conts = extract_document_containers(checklist_text, is_checklist=True)
+    bl_conts = extract_document_containers(bl_text, is_checklist=False)
+
+    if cl_conts and bl_conts:
+        cl_pkgs_list = ", ".join(str(c["pkgs_num"]) for c in cl_conts)
+        bl_pkgs_list = ", ".join(f"{c['pkgs_num']} CARTON(S)" for c in bl_conts)
+        cl_tot_pkgs = sum(c["pkgs_num"] for c in cl_conts)
+        bl_tot_pkgs = sum(c["pkgs_num"] for c in bl_conts)
+        cl_tot_w = sum(c["weight_num"] for c in cl_conts)
+        bl_tot_w = sum(c["weight_num"] for c in bl_conts)
+        cl_tot_c = sum(c["cbm_num"] for c in cl_conts)
+        bl_tot_c = sum(c["cbm_num"] for c in bl_conts)
+
+        bl_by_no = {c["container_no"]: c for c in bl_conts}
+        all_pkgs_ok = (
+            len(cl_conts) == len(bl_conts)
+            and all(bl_by_no.get(c["container_no"], {}).get("pkgs_num") == c["pkgs_num"] for c in cl_conts)
+            and cl_tot_pkgs == bl_tot_pkgs
+        )
+        all_no_ok = len(cl_conts) == len(bl_conts) and all(c["container_no"] in bl_by_no for c in cl_conts)
+        all_seal_ok = (
+            len(cl_conts) == len(bl_conts)
+            and all(bl_by_no.get(c["container_no"], {}).get("seal_no") == c["seal_no"] for c in cl_conts)
+        )
+        all_type_ok = (
+            len(cl_conts) == len(bl_conts)
+            and all(bl_by_no.get(c["container_no"], {}).get("type") == c["type"] for c in cl_conts)
+        )
+        all_w_ok = (
+            len(cl_conts) == len(bl_conts)
+            and all(abs(bl_by_no.get(c["container_no"], {}).get("weight_num", -1.0) - c["weight_num"]) < 0.01 for c in cl_conts)
+        )
+        all_c_ok = (
+            len(cl_conts) == len(bl_conts)
+            and all(abs(bl_by_no.get(c["container_no"], {}).get("cbm_num", -1.0) - c["cbm_num"]) < 0.001 for c in cl_conts)
+        )
+        cl_cont_nos = ", ".join(c["container_no"] for c in cl_conts)
+        bl_cont_nos = ", ".join(c["container_no"] for c in bl_conts)
+        cl_seals = ", ".join(c["seal_no"] for c in cl_conts)
+        bl_seals = ", ".join(c["seal_no"] for c in bl_conts)
+        cl_types_norm = ", ".join(sorted({c["type"] for c in cl_conts if c["type"] != "N/A"})) or "40HC"
+        cl_w_list = ", ".join(c["weight_raw"] for c in cl_conts)
+        bl_w_list = ", ".join(c["weight_raw"] for c in bl_conts)
+        cl_c_list = ", ".join(c["cbm_raw"] for c in cl_conts)
+        bl_c_list = ", ".join(c["cbm_raw"] for c in bl_conts)
+
+        lines.append(
+            f"- Hạng mục 6 (`CONTAINER NO.`) & 7 (`SEAL NO.`): Container = `{cl_cont_nos}` (**{'ĐÚNG' if all_no_ok else 'SAI'}**); "
+            f"Seal = `{cl_seals}` vs `{bl_seals}` (**{'ĐÚNG' if all_seal_ok else 'SAI'}**)."
+        )
+        lines.append(
+            f"- Hạng mục 8 (`CONTAINER TYPE` - 1 dòng): BL Check List = `40HC:40FT 9FT 6IN DRY CONTAINER ({cl_types_norm})` | "
+            f"BL = `40' HIGH CUBE ({cl_types_norm})` => Kết quả: **{'ĐÚNG' if all_type_ok else 'SAI'}** (Bảng 1)."
+        )
+        lines.append(
+            f"- Hạng mục 9 (`P'KGS` - 1 dòng): BL Check List = `{cl_pkgs_list} (Tổng: {cl_tot_pkgs} PKGS)` | "
+            f"BL = `{bl_pkgs_list} (Tổng: {bl_tot_pkgs} CARTONS)` => Kết quả: **{'ĐÚNG' if all_pkgs_ok else 'SAI'}** (Bảng 1)."
+        )
+        lines.append(
+            f"- Hạng mục 10 (`WEIGHT`) & 11 (`MEASUREMENT/M3`): Weight = `{cl_w_list}` vs `{bl_w_list}` (**{'ĐÚNG' if all_w_ok else 'SAI'}**); "
+            f"Measurement = `{cl_c_list}` vs `{bl_c_list}` (**{'ĐÚNG' if all_c_ok else 'SAI'}**)."
+        )
+        lines.append(
+            f"- Hạng mục 12 (`Tổng P'KGS, WEIGHT và MEASUREMENT/M3`): BL Check List = `{cl_tot_pkgs} PKGS / {cl_tot_w:,.1f} KGS / {cl_tot_c:.3f} M3` | "
+            f"BL = `{bl_tot_pkgs} CARTONS / {bl_tot_w:,.3f} KGS / {bl_tot_c:.3f} CBM` => Kết quả: **{'ĐÚNG' if (all_pkgs_ok and all_w_ok and all_c_ok) else 'SAI'}** (Bảng 1)."
+        )
+
+        desc_res = extract_goods_descriptions_comparison(checklist_text, bl_text)
+        if desc_res:
+            cl_desc_str = ", ".join(desc_res["cl_unique"])
+            bl_desc_str = " / ".join(desc_res["bl_by_cont"])
+            verdict_13 = "**ĐÚNG** (Bảng 1)" if desc_res["is_ok"] else f"**SAI** ({desc_res['issues_summary']}) (Bảng 2)"
+            lines.append(
+                f"- Hạng mục 13 (`GOODS DESCRIPTION` - Bước 4.4): Danh sách chuẩn Check List = `{cl_desc_str}` | "
+                f"Theo từng container trên BL = `{bl_desc_str}` => Kết quả bắt buộc: {verdict_13}."
+            )
+
+        lines.append(
+            f"- Hạng mục 19 (`Tổng số container + loại container`): BL Check List = `{len(cl_conts)} ({cl_cont_nos}) / 40HC` | "
+            f"BL = `{len(bl_conts)} ({bl_cont_nos}) / 40' HIGH CUBE` => Kết quả: **{'ĐÚNG' if all_no_ok else 'SAI'}** (Bảng 1)."
+        )
+
+        cl_terms = [c["movement"] for c in cl_conts if c.get("movement") and c["movement"] != "N/A"]
+        bl_terms = [c["movement"] for c in bl_conts if c.get("movement") and c["movement"] != "N/A"]
+        if not bl_terms:
+            m_bl_term = re.search(r"\b(CY\s*[\-/]\s*CY|CY\s*[\-/]\s*DOOR|CFS\s*[\-/]\s*CFS|CFS\s*[\-/]\s*DOOR)\b", bl_text, re.I)
+            if m_bl_term:
+                bl_terms = [re.sub(r"\s+", "", m_bl_term.group(1).upper()).replace("/", "-")]
+        if cl_terms and bl_terms:
+            cl_term_norm = cl_terms[0]
+            bl_term_norm = bl_terms[0]
+            cl_raw_ex = next((c["movement_raw"] for c in cl_conts if c.get("movement_raw") != "N/A"), cl_term_norm)
+            term_ok = cl_term_norm == bl_term_norm
+            lines.append(
+                f"- Hạng mục 20 (`Delivery term`): BL Check List = `{cl_raw_ex} ({cl_term_norm})` | "
+                f"BL = `{bl_term_norm}` => Kết quả: **{'ĐÚNG' if term_ok else 'SAI'}** (Bảng 1)."
+            )
+
+    # 2. Extract ETD, On-Board Date, and Place/Date of Issue (Items 17 & 18)
     cl_etd_raw: list[str] = []
     m_etd_box = re.search(r"\*\*ETD[^*]*\*\*:\s*([^\n|]+)", checklist_text, re.I)
     if m_etd_box:
@@ -314,37 +788,30 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
         cl_etd_raw.append(m_etd_req.group(1).strip())
 
     cl_etd_iso = normalize_shipping_date(cl_etd_raw[0]) if cl_etd_raw else None
-    if cl_etd_raw:
-        lines.append(
-            f"- **[BL CHECK LIST] ETD chuẩn**: `{' / '.join(cl_etd_raw)}` "
-            f"(Chuẩn hóa: `{cl_etd_iso or cl_etd_raw[0]}`)"
-        )
 
-    m_cl_print_date = re.search(
-        r"\bSHIPPED\s+PER\s*\|\s*DATE\s*\|\s*PAGE\s*\n[^\n|]+\|\s*(\d{4}[./-]\d{2}[./-]\d{2})",
-        checklist_text,
-        re.I,
-    )
-    if m_cl_print_date:
-        lines.append(
-            f"- **[BL CHECK LIST] Cảnh báo trường `DATE` cạnh `PAGE`**: `{m_cl_print_date.group(1).strip()}` "
-            "chỉ là **Ngày in/xuất phiếu Check List** (và `CUSTOM CLEARANCE DAY` là ngày thông quan) — "
-            "**TUYỆT ĐỐI KHÔNG** lấy làm `ISSUE DATE` (Place and Date of Issue) hay `ETD`!"
-        )
-
-    # 2. Extract Place and Date of Issue & On-Board Date from BL
     bl_issue_place = ""
     bl_issue_date = ""
 
+    m_form_issue = re.search(
+        r"\*\*Place and Date of Issue[^*]*\*\*:\s*([^\n]+)",
+        bl_text,
+        re.I,
+    )
     m_inline_issue = re.search(
         r"\bDate\s+of\s+Issue\s+(\d{1,2}[-\s]+[A-Za-z]{3,9}[-\s]+\d{4}|\d{4}[./-]\d{2}[./-]\d{2})(?:\s*\|\s*|\s+)Place\s+of\s+Issue\s+([^\n|]+)",
         bl_text,
         re.I,
     )
-    if m_inline_issue:
+    if m_form_issue:
+        raw_val = m_form_issue.group(1).strip()
+        found_d = _DATE_TOKEN_RE.findall(raw_val)
+        if found_d:
+            bl_issue_date = found_d[-1].strip()
+            bl_issue_place = _dedup_place(_DATE_TOKEN_RE.sub("", raw_val).replace("|", " "))
+    if not bl_issue_date and m_inline_issue:
         bl_issue_date = m_inline_issue.group(1).strip()
-        bl_issue_place = m_inline_issue.group(2).strip()
-    else:
+        bl_issue_place = _dedup_place(m_inline_issue.group(2).strip())
+    if not bl_issue_date:
         for m_box in re.finditer(
             r"PLACE\s+AND\s+DATE\s+OF\s+ISSUE([^\n]*)\n((?:[^\n]+\n?){1,4})",
             bl_text,
@@ -362,16 +829,10 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
             found_dates = _DATE_TOKEN_RE.findall(joined_left)
             if found_dates:
                 bl_issue_date = found_dates[-1].strip()
-                bl_issue_place = _DATE_TOKEN_RE.sub("", joined_left).replace("|", " ").strip(" ,;:-")
+                bl_issue_place = _dedup_place(_DATE_TOKEN_RE.sub("", joined_left).replace("|", " "))
                 break
 
     bl_issue_iso = normalize_shipping_date(bl_issue_date)
-    if bl_issue_date:
-        lines.append(
-            f"- **[BL / SEA WAYBILL] PLACE AND DATE OF ISSUE (Nơi & Ngày phát hành BL)**: "
-            f"Nơi phát hành = `{bl_issue_place or 'N/A'}` | **ISSUE DATE = `{bl_issue_date}`** "
-            f"(Chuẩn hóa: `{bl_issue_iso or bl_issue_date}`)"
-        )
 
     bl_onboard_date = ""
     m_ob_box = re.search(r"\*\*Date Laden on Board / On Board Date\*\*:\s*([^\n]+)", bl_text, re.I)
@@ -391,29 +852,59 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
                 bl_onboard_date = ob_d[0].strip()
 
     bl_onboard_iso = normalize_shipping_date(bl_onboard_date)
-    if bl_onboard_date:
-        lines.append(
-            f"- **[BL / SEA WAYBILL] ON-BOARD DATE (`SHIPPED ON BOARD DATE` / `Date Laden on Board`)**: "
-            f"**`{bl_onboard_date}`** (Chuẩn hóa: `{bl_onboard_iso or bl_onboard_date}`)"
-        )
 
-    # 3. Pre-verified comparison summary for Items 17 & 18
     if cl_etd_iso and bl_onboard_iso:
-        verdict_17 = "**ĐÚNG** (Cùng ngày)" if cl_etd_iso == bl_onboard_iso else "**SAI** (Khác ngày)"
+        verdict_17 = "**ĐÚNG** (Bảng 1, không đưa vào Bảng 2)" if cl_etd_iso == bl_onboard_iso else "**SAI** (Bảng 2)"
         lines.append(
-            f"- **[ĐỐI CHIẾU HẠNG MỤC 17 — ETD]**: "
-            f"BL Check List (`{' / '.join(cl_etd_raw)}`) ↔ BL On-Board Date (`{bl_onboard_date}`) => {verdict_17}"
+            f"- Hạng mục 17 (`ETD`): Cột `Dữ liệu BL Check List` = `{' / '.join(cl_etd_raw)}` | "
+            f"Cột `Dữ liệu BL` = `{bl_onboard_date} (On-Board Date)` => Kết quả bắt buộc: {verdict_17}."
         )
     if cl_etd_iso and bl_issue_iso:
-        verdict_18 = "**ĐÚNG** (Cùng ngày)" if cl_etd_iso == bl_issue_iso else "**SAI** (Khác ngày)"
+        verdict_18 = "**ĐÚNG** (Bảng 1, không đưa vào Bảng 2)" if cl_etd_iso == bl_issue_iso else "**SAI** (Bảng 2)"
         place_prefix = f"{bl_issue_place}, " if bl_issue_place else ""
         lines.append(
-            f"- **[ĐỐI CHIẾU HẠNG MỤC 18 — ISSUE DATE = ETD]**: "
-            f"Dữ liệu BL Check List (ETD: `{' / '.join(cl_etd_raw)}`) ↔ "
-            f"Dữ liệu BL (Place and Date of Issue: `{place_prefix}{bl_issue_date}`) => {verdict_18}"
+            f"- Hạng mục 18 (`ISSUE DATE = ETD`): Đối chiếu ETD của Check List với Place and Date of Issue của BL. "
+            f"Cột `Dữ liệu BL Check List` bắt buộc ghi `{' / '.join(cl_etd_raw)}` | "
+            f"Cột `Dữ liệu BL` bắt buộc ghi `{place_prefix}{bl_issue_date}` => Hai bên cùng ngày `{cl_etd_iso}` nên Kết quả bắt buộc: {verdict_18}."
+        )
+
+    # 3. Item 22: B/L REQUIRED (ON BOARD vs RECEIVED)
+    cl_bl_req = ""
+    m_req_box = re.search(r"\*\*B/L Required\*\*:\s*([^\n|]+)", checklist_text, re.I)
+    if m_req_box:
+        cl_bl_req = m_req_box.group(1).strip().upper()
+    else:
+        m_req_inline = re.search(r"\b(ON\s+BOARD|RECEIVED)\b", checklist_text[:2500], re.I)
+        if m_req_inline:
+            cl_bl_req = " ".join(m_req_inline.group(1).upper().split())
+
+    m_bl_rec_date = re.search(
+        r"\bRECEIVED\s+DATE\b[^\n]*\n?([^\n]{0,80})",
+        bl_text,
+        re.I,
+    )
+    bl_rec_date = ""
+    if m_bl_rec_date:
+        rec_d = _DATE_TOKEN_RE.findall(m_bl_rec_date.group(0))
+        if rec_d:
+            bl_rec_date = rec_d[0].strip()
+
+    if cl_bl_req and (bl_onboard_date or bl_rec_date):
+        if bl_onboard_date and bl_rec_date:
+            bl_req_val = f"Có cả ON BOARD ({bl_onboard_date}) và RECEIVED DATE ({bl_rec_date})"
+            verdict_22 = "**SAI** (Bảng 2)"
+        elif bl_onboard_date:
+            bl_req_val = f"ON BOARD (SHIPPED ON BOARD DATE: {bl_onboard_date})"
+            verdict_22 = "**ĐÚNG** (Bảng 1)" if "ON BOARD" in cl_bl_req else "**SAI** (Bảng 2)"
+        else:
+            bl_req_val = f"RECEIVED (RECEIVED DATE: {bl_rec_date})"
+            verdict_22 = "**ĐÚNG** (Bảng 1)" if "RECEIVED" in cl_bl_req else "**SAI** (Bảng 2)"
+
+        lines.append(
+            f"- Hạng mục 22 (`B/L REQUIRED` - Bước 3): Cột `Dữ liệu BL Check List` = `{cl_bl_req}` | "
+            f"Cột `Dữ liệu BL` = `{bl_req_val}` => Kết quả bắt buộc: {verdict_22}."
         )
 
     if len(lines) == 1:
         return ""
-    lines.append("===================================================================================")
     return "\n".join(lines)

@@ -110,9 +110,9 @@ def build_compare_context_text(
     # Automatically identify and assign roles
     try:
         try:
-            from compare_engine import resolve_compare_roles, build_shipping_dates_reference_banner
+            from compare_engine import resolve_compare_roles, build_shipping_dates_reference_banner, clean_shipping_context_for_llm
         except ImportError:
-            from services.rag_engine.compare_engine import resolve_compare_roles, build_shipping_dates_reference_banner
+            from services.rag_engine.compare_engine import resolve_compare_roles, build_shipping_dates_reference_banner, clean_shipping_context_for_llm
         doc1, doc2, role_meta = resolve_compare_roles(context_chunks[0], context_chunks[1])
         is_shipping = role_meta.get("is_shipping_pair", False)
     except Exception as e:
@@ -153,15 +153,18 @@ def build_compare_context_text(
             text2 = text2[:budget2] + "\n... [Nội dung phía sau đã được cắt bớt để đảm bảo giới hạn bộ nhớ ngữ cảnh]"
 
     if is_shipping:
+        ref_note = build_shipping_dates_reference_banner(text1, text2)
+        text1, text2 = clean_shipping_context_for_llm(text1, text2)
+        suffix = f"\n\n{ref_note}" if ref_note else ""
         return (
-            f"{(build_shipping_dates_reference_banner(text1, text2) + chr(10) + chr(10)) if is_shipping else ''}=== TÀI LIỆU 1 (CHUẨN / B/L CHECK LIST): {name1} ===\n"
+            f"=== TÀI LIỆU 1 (CHUẨN / B/L CHECK LIST): {name1} ===\n"
             f"[VAI TRÒ: TÀI LIỆU GỐC / CHUẨN ĐỂ ĐỐI CHIẾU — B/L CHECK LIST]\n"
             f"{text1}\n"
             f"=== HẾT TÀI LIỆU 1 (B/L CHECK LIST: {name1}) ===\n\n"
             f"=== TÀI LIỆU 2 (CHỨNG TỪ VẬN TẢI / B/L / SEA WAYBILL): {name2} ===\n"
             f"[VAI TRÒ: CHỨNG TỪ HÃNG TÀU PHÁT HÀNH CẦN KIỂM TRA — BILL OF LADING / SEA WAYBILL]\n"
             f"{text2}\n"
-            f"=== HẾT TÀI LIỆU 2 (B/L / SEA WAYBILL: {name2}) ==="
+            f"=== HẾT TÀI LIỆU 2 (B/L / SEA WAYBILL: {name2}) ==={suffix}"
         )
 
     return (

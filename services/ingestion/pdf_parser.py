@@ -765,6 +765,15 @@ def _extract_bl_anchor_boxes(
 
         final_val = "\n".join(cleaned_lines).strip()
         if final_val:
+            # Skip Check List Print Date ('DATE | PAGE') so it never confuses Issue Date / ETD
+            if anc["label"].startswith("Check List Print Date"):
+                continue
+            # Disambiguate Checklist top header 'SHIPPER: BIL' vs actual invoice 'SHIPPER: BIVN'
+            if anc["label"] == "1. Shipper":
+                if final_val.strip().upper() == "BIL":
+                    continue
+                if re.match(r"^BIVN\b", final_val.strip(), re.I):
+                    final_val = "BIVN (BROTHER INDUSTRIES (VIETNAM) LTD.)"
             extracted.append((anc["label"], final_val))
 
     return extracted
@@ -969,17 +978,18 @@ def _append_shipping_structured_summary(page_text: str, page_num: int) -> str:
             )
             seal_no = s_m.group(1).strip() if s_m else "N/A"
 
-            # 1.4 Type
+            # 1.4 Type (include up to 120 chars before container number for Checklist 'STUFFING PLAN 40HC:... | FCL CONTAINER NO. ...')
+            type_search_block = page_text[max(0, start - 120) : end]
             t_m = re.search(
                 r"((?:20|40|45)(?:\'|\s*ft)?\s*(?:gp|dc|hc|hq|rf|ot|fr|tk|std|high\s+cube)|40HC:40FT[^\n|]+)",
-                block,
+                type_search_block,
                 re.I,
             )
             cont_type = _normalize_container_type(t_m.group(1)) if t_m else "N/A"
 
-            # 1.5 Movement Term
+            # 1.5 Movement Term (supports pipe-separated Checklist layout e.g. 'BAC NINH | CY / LONG BEACH | CY')
             term_m = re.search(
-                r"([A-Z\s]+CY\s*/\s*[A-Z\s]+CY|[A-Z\s]+CY\s*/\s*[A-Z\s]+SDD|\b(?:FCL\s*/\s*FCL|LCL\s*/\s*LCL|CY\s*[\-/]\s*CY|CY\s*[\-/]\s*DOOR|CFS\s*[\-/]\s*CFS)\b)",
+                r"(\b(?:CY|CFS)(?:\s*\|\s*|\s+)[/\-](?:\s*\|\s*|\s+|[A-Z\s|]*\|\s*)(?:CY|SDD|DOOR|CFS)\b|[A-Z\s]+CY\s*/\s*[A-Z\s]+(?:CY|SDD)|\b(?:FCL\s*/\s*FCL|LCL\s*/\s*LCL|CY\s*[\-/]\s*CY|CY\s*[\-/]\s*DOOR|CFS\s*[\-/]\s*CFS|CFS\s*[\-/]\s*DOOR)\b)",
                 block,
                 re.I,
             )
@@ -1051,8 +1061,9 @@ def _append_shipping_structured_summary(page_text: str, page_num: int) -> str:
     )
     if orphan_stot:
         summary_parts.append(
-            f"- **[S-TOTAL CHUYỂN TIẾP TỪ TRANG TRƯỚC - TRANG {page_num}]**: "
-            f"Sets: {orphan_stot.group(1)} | P'KGS: {orphan_stot.group(2)} | Gross Weight: {orphan_stot.group(3)} KGS | Measurement: {orphan_stot.group(4)} CBM"
+            f"- **[S-TOTAL CHUYỂN TIẾP CỦA CONTAINER Ở CUỐI TRANG TRƯỚC - TRANG {page_num}]**: "
+            f"**P'KGS = {orphan_stot.group(2)} PKGS** (Cột 2) | Gross Weight = {orphan_stot.group(3)} KGS | Measurement = {orphan_stot.group(4)} CBM "
+            f"*(Lưu ý: số {orphan_stot.group(1)} ở cột 1 là SETS/Q'TY, TUYỆT ĐỐI KHÔNG lấy {orphan_stot.group(1)} làm P'KGS!)*"
         )
 
     # 3. Report extracted HS codes as evidence only; do not evaluate compliance.
@@ -1158,16 +1169,7 @@ def _extract_page_shipping_dates_summary(page_text: str, page_num: int) -> str:
         if etd_vals:
             notes.append(f"  - **ETD chuẩn (BL Check List)**: `{' / '.join(etd_vals)}` (Dùng để đối chiếu cả Hạng mục 17 `ETD` và Hạng mục 18 `ISSUE DATE = ETD`)")
 
-        m_rep_date = re.search(
-            r"\bSHIPPED\s+PER\s*\|\s*DATE\s*\|\s*PAGE\s*\n[^\n|]+\|\s*(\d{4}[./-]\d{2}[./-]\d{2})",
-            page_text,
-            re.I,
-        )
-        if m_rep_date:
-            notes.append(
-                f"  - **Ngày in phiếu Check List (`DATE` cạnh `PAGE`)**: `{m_rep_date.group(1).strip()}` "
-                "(LƯU Ý: Đây chỉ là ngày xuất phiếu Check List, **KHÔNG PHẢI** là Issue Date / Place of Issue và **KHÔNG PHẢI** ETD)"
-            )
+
 
     # 2. Check if this page has BL Place and Date of Issue or Shipped on Board Date
     date_token_re = re.compile(
@@ -1206,7 +1208,15 @@ def _extract_page_shipping_dates_summary(page_text: str, page_num: int) -> str:
             found_dates = date_token_re.findall(joined_left)
             if found_dates:
                 issue_dt = found_dates[-1].strip()
-                place_part = date_token_re.sub("", joined_left).replace("|", " ").strip(" ,;:-")
+                raw_place = date_token_re.sub("", joined_left).replace("|", " ")
+                raw_place = re.sub(r"\*\*[^*]+\*\*:?", "", raw_place)
+                raw_place = re.sub(r"\b(?:SIGNED\s+on\s+behalf|by\s+MSC|As\s+Agent|Carrier|Mediterranean\s+Shipping)[^\n]*", "", raw_place, flags=re.I)
+                # Deduplicate consecutive repeated words (e.g. 'MSC Ha Ha Noi Noi' -> 'MSC Ha Noi')
+                dedup_words: list[str] = []
+                for w_tok in raw_place.split():
+                    if not dedup_words or w_tok.lower() != dedup_words[-1].lower():
+                        dedup_words.append(w_tok)
+                place_part = " ".join(dedup_words).strip(" ,;:-")
                 notes.append(
                     f"  - **PLACE AND DATE OF ISSUE (trên BL)**: Nơi phát hành = `{place_part or 'N/A'}` | "
                     f"**ISSUE DATE = `{issue_dt}`** (Dùng để đối chiếu Hạng mục 18 `ISSUE DATE = ETD`)"

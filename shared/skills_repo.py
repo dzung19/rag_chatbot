@@ -34,67 +34,53 @@ class SkillSystemError(Exception):
 
 
 BUSINESS_COMPARE_BL_PROMPT = """# Mục đích
-Đối chiếu **BL** với **BL Check List** do người dùng cung cấp, lấy BL Check List làm chuẩn, ngoại trừ SHIPPER dùng dữ liệu chuẩn trong hướng dẫn này. Báo cáo đầy đủ, chính xác và không suy đoán.
+Đối chiếu **BL** với **BL Check List** do người dùng cung cấp, lấy BL Check List làm chuẩn, ngoại trừ SHIPPER dùng dữ liệu chuẩn trong hướng dẫn này. Báo cáo đầy đủ 23 hạng mục, chính xác và không suy đoán.
 
 # Nguyên tắc bắt buộc
-- Chỉ bắt đầu khi có cả hai file hoặc nội dung tương ứng. Tự động nhận diện file nào là BL và file nào là BL Check List dựa trên nội dung tài liệu.
-- Có dữ liệu ở cả hai nguồn: đối chiếu và kết luận **ĐÚNG** hoặc **SAI**.
-- Thiếu dữ liệu ở một trong hai nguồn: kết luận **KHÔNG TÌM THẤY**.
-- Không xác định được cách đối chiếu: kết luận **KHÔNG HIỂU**.
-- Không suy luận dữ liệu từ BL sang BL Check List hoặc ngược lại.
-- Bỏ qua khác biệt chỉ về dấu cách hoặc định dạng tại CONSIGNEE, NOTIFY PARTY 1, NOTIFY PARTY 2 và DELIVERY TO.
-- Nếu thông tin dài được nối bằng `*`, `>>` hoặc ký hiệu tương tự, tìm phần nối và ghép đủ nội dung trước khi so sánh.
-- Với mọi điểm sai, in đậm phần dữ liệu khác nhau và chữ **SAI**.
+- Tự động nhận diện file nào là BL và file nào là BL Check List dựa trên nội dung tài liệu.
+- Có dữ liệu ở cả hai nguồn: đối chiếu và kết luận **ĐÚNG** (đưa vào Bảng 1) hoặc **SAI** (đưa vào Bảng 2). Tuyệt đối không đưa hạng mục **ĐÚNG** vào Bảng 2.
+- Thiếu dữ liệu ở một trong hai nguồn: kết luận **KHÔNG TÌM THẤY** (Bảng 2).
+- Không xác định được cách đối chiếu: kết luận **KHÔNG HIỂU** (Bảng 2).
+- Bỏ qua khác biệt chỉ về dấu cách, viết hoa/thường hoặc định dạng tại CONSIGNEE, NOTIFY PARTY 1, NOTIFY PARTY 2 và DELIVERY TO.
+- Với thông tin dài nối bằng `*`, `>>`, tìm phần nối và ghép đủ trước khi so sánh.
+- Với mọi điểm sai, in đậm phần dữ liệu khác nhau và chữ **SAI**. Không dùng ký hiệu LaTeX (`$...$`) trong bảng.
 
-# Dữ liệu chuẩn SHIPPER
+# Dữ liệu chuẩn SHIPPER (Hạng mục 1)
 BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, HAI PHONG CITY, VIETNAM TEL NO.84-2203-545 860 FAX:545 878 MS. HARUNA WATANABE TRN+0800304173.
+- Trên BL Check List: lấy `SHIPPER: BIVN` dưới mỗi Invoice (`BIVN` là viết tắt của `# Dữ liệu chuẩn SHIPPER`), không lấy tiêu đề `SHIPPER: BIL` ở góc đầu trang, dừng tại nhãn kế tiếp (không lấy số tiền/INCOTERMS). Nếu `SHIPPER` trên BL khớp với `# Dữ liệu chuẩn SHIPPER` thì kết luận **ĐÚNG**.
 
-# Quy tắc ánh xạ
-- FROM ↔ PORT OF LOADING.
-- VIA ↔ PORT OF DISCHARGE.
-- TO ↔ PLACE OF DELIVERY.
-- REQUEST NO. ↔ SHIPMENT/SHIPMENT NO.
-- NOTIFY PARTY 2 ↔ ALSO NOTIFY PARTY.
-- ETD HPH ON trong REQUEST ↔ ETD trên BL.
-- ETD: lấy ETD/ETD HPH của đúng cảng đi và chặng.
-- ON-BOARD DATE: lấy ngày tại Laden/Shipped on Board.
-- ISSUE DATE (Place and Date of Issue): Chỉ lấy trên file BL tại ô `PLACE AND DATE OF ISSUE` / `Date of Issue` ở cuối trang BL (lưu ý đọc đầy đủ cả dòng tên nơi phát hành như `MSC Ha Noi` VÀ dòng ngày phát hành nằm ngay bên dưới như `14-Sep-2026` trong cùng ô). CẢNH BÁO TRÊN BL CHECK LIST: File BL Check List KHÔNG CÓ ngày `ISSUE DATE` (mục `B/L ISSUED AT` chỉ ghi nơi phát hành). Trường `DATE` ở góc trên cùng cạnh `PAGE` (ví dụ `DATE 2026.09.15` — ngày đầu tiên ở đầu trang Check List) chỉ là ngày in phiếu Check List, và `CUSTOM CLEARANCE DAY` là ngày thông quan; TUYỆT ĐỐI KHÔNG lấy trường `DATE` ở đầu trang BL Check List làm `ISSUE DATE` hay `ETD`!
-- Nhãn Date/Dated phải được xác định theo vùng chứa, không lấy ngày bất kỳ.
-- Ưu tiên đối chiếu ETD trực tiếp. Nếu BL chỉ có on-board date,
-  ghi rõ đây là ngày liên quan; chỉ dùng thay ETD khi nghiệp vụ cho phép.
-- Kiểm tra ISSUE DATE = ETD (Hạng mục 18): lấy ISSUE DATE thực tế trong ô `PLACE AND DATE OF ISSUE` trên BL (ví dụ `14-Sep-2026`) đối chiếu với ETD chuẩn trên BL Check List (tại ô `ETD` / `ETD HPH ON`, ví dụ `2026.09.14` / `14 SEP 2026`). Khi trình bày dòng `18. ISSUE DATE = ETD`: cột `Dữ liệu BL Check List` ghi ETD chuẩn của Check List (`2026.09.14 / 14 SEP 2026`), cột `Dữ liệu BL` ghi Place and Date of Issue trên BL (`MSC Ha Noi, 14-Sep-2026`); nếu cùng ngày/tháng/năm thì kết luận **ĐÚNG**. Không dùng issue date để điền thay ETD ở Hạng mục 17.
-- Chuẩn hóa định dạng ngày nhưng giữ giá trị gốc và trang nguồn.
-- Nếu có ngày nhưng ánh xạ chưa rõ, kết luận KHÔNG HIỂU.
-  Chỉ kết luận KHÔNG TÌM THẤY sau khi kiểm tra đủ nội dung;
-  nếu context bị cắt, ghi CHƯA ĐỦ BẰNG CHỨNG.
-- SDD trên BL Check List ↔ DOOR trên BL. Ví dụ: `CY / BADEN SDD` ↔ `CY/DOOR`.
+# Quy tắc ánh xạ & nghiệp vụ
+- `FROM` ↔ `PORT OF LOADING` (Hạng mục 14).
+- `VIA` ↔ `PORT OF DISCHARGE` (Hạng mục 15).
+- `TO` ↔ `PLACE OF DELIVERY` (Hạng mục 16).
+- `REQUEST NO.` ↔ `SHIPMENT / SHIPMENT NO.` (Hạng mục 21).
+- `NOTIFY PARTY 2` ↔ `ALSO NOTIFY PARTY` (Hạng mục 4).
+- **Số bill và invoice**: Kiểm tra số bill tại `BILL OF LADING (AIR WAYBILL)` khớp BL; tại trang `G-TOTAL` kiểm tra đủ toàn bộ invoice (dạng `824957-0 1` hiểu là `-0` và `-1`).
+- **Hạng mục 8 (`CONTAINER TYPE`)**: Các cách ghi cùng loại container như `40HC`, `40HQ`, `40' HIGH CUBE`, `40HC:40FT 9FT 6IN DRY CONTAINER` là tương đương → **ĐÚNG** (trình bày gộp 1 dòng).
+- **Hạng mục 9 (`P'KGS`)**: Trình bày toàn bộ các container gộp trên **1 dòng duy nhất**. Trên BL Check List lấy Cột 2 của `S-TOTAL` (`P'KGS`), không lấy Cột 1 (`SETS`). Đơn vị `PKGS` và `CARTON(S)` là tương đương.
+- **Hạng mục 10 (`WEIGHT`) & 11 (`MEASUREMENT/M3`)**: Lấy từ `S-TOTAL`/`TOTAL GROSS WEIGHT` từng container và tổng `G-TOTAL`/`TOTAL` (Hạng mục 12). Không suy WEIGHT từ P'KGS.
+- **Hạng mục 13 (`GOODS DESCRIPTION`)**:
+  - 4.1. Lấy các dòng mô tả hàng hóa từ dưới `INVOICE NO.` đến ngay trên dòng `TTL` đầu tiên của từng invoice trên Check List.
+  - 4.2. Gộp tất cả invoice và loại trùng để có **danh sách chuẩn duy nhất**.
+  - 4.3. Trích xuất description trên BL theo từng container, giữ nguyên mọi lần lặp.
+  - 4.4. Mỗi description chuẩn chỉ được xuất hiện **đúng 1 lần** trên toàn bộ BL (0 lần → **SAI: thiếu**, >=2 lần trên các container → **SAI: trùng lặp**, ngoài danh sách chuẩn → **SAI: thừa**).
+- **Hạng mục 17 (`ETD`)**: Đối chiếu `ETD` / `ETD HPH ON` trên BL Check List với `SHIPPED ON BOARD DATE` / `ETD` trên BL. Khác định dạng ngày (`YYYY.MM.DD` vs `DD-Mon-YYYY`) nhưng cùng ngày/tháng/năm là **ĐÚNG**.
+- **Hạng mục 18 (`ISSUE DATE = ETD`)**: Đối chiếu ngày `ETD` thực tế trên BL Check List (ghi ở cột `Dữ liệu BL Check List`) với nơi & ngày phát hành tại ô `PLACE AND DATE OF ISSUE` ở cuối trang BL (ghi ở cột `Dữ liệu BL` dạng `<Nơi phát hành>, <Ngày phát hành>`). Nếu cùng ngày/tháng/năm thì kết luận **ĐÚNG** (đưa vào Bảng 1). Không lấy ngày in phiếu cạnh `PAGE` ở đầu trang Check List.
+- **Hạng mục 20 (`Delivery term`)**: Trên Check List đọc dòng dưới `STUFFING PLAN` (`CY / ... CY` là `CY-CY`; `CY / ... SDD` là `CY-DOOR` vì `SDD` = `DOOR`). Đối chiếu với Delivery term trên BL (`CY-CY`, `CY-DOOR`, `CFS-CFS`, `CFS-DOOR`).
+- **Hạng mục 22 (`B/L REQUIRED`)**: Trên BL, có `SHIPPED ON BOARD DATE + ngày` nghĩa là `ON BOARD`; có `RECEIVED DATE + ngày` nghĩa là `RECEIVED` (có đồng thời cả hai là **SAI**). Đối chiếu với `B/L REQUIRED` trên Check List; nếu khớp thì kết luận **ĐÚNG**.
+- **Hạng mục 23 (`HS code`)**: BL không được hiển thị HS code (cả hai không có hoặc chỉ Check List không yêu cầu hiển thị trên BL → kiểm tra theo thực tế tài liệu; nếu BL hiển thị HS code là **SAI**).
 
-# Các bước kiểm tra
-1. **Đọc và chuẩn hóa:** nhận diện từng trang, từng invoice, từng container và các phần thông tin nối tiếp; giữ nguyên giá trị gốc để trình bày.
-2. **Số bill và invoice:**
-   - Lấy chuỗi từ phần số đến hết chữ/số trên từng dòng INVOICE NO.; ví dụ `824957-0`.
-   - Kiểm tra mỗi dòng BILL OF LADING (AIR WAYBILL) có số bill và số đó khớp BL.
-   - Tại trang tổng hợp có G-TOTAL, kiểm tra đã bao gồm toàn bộ invoice ở các trang trước và không có invoice thừa.
-   - Hiểu dạng rút gọn `824957-0 1` là `824957-0` và `824957-1`.
-3. **B/L REQUIRED:** trên BL, `ON BOARD Date + ngày` nghĩa là ON BOARD; `RECEIVED DATE + ngày` nghĩa là RECEIVED. Đối chiếu với B/L REQUIRED trên Check List. BL chỉ có đúng một loại ngày là hợp lệ; có đồng thời cả hai loại là **SAI**.
-4. **Description of goods:**
-   - 4.1. Với mỗi invoice trong BL Check List: lấy toàn bộ nội dung từ dưới dòng INVOICE NO. đến ngay trên dòng TTL đầu tiên. Mỗi dòng mô tả hàng hóa là một description riêng.
-   - 4.2. Gộp description của tất cả invoice và loại trùng hoàn toàn để có danh sách chuẩn duy nhất.
-   - 4.3. Trích xuất description trên BL theo từng container, giữ nguyên mọi lần lặp.
-   - 4.4. Thứ tự kiểm tra: Mỗi description chuẩn phải xuất hiện đúng 1 lần trên toàn bộ BL (0 lần → **SAI: thiếu**, >=2 lần → **SAI: trùng lặp**, ngoài danh sách chuẩn → **SAI: thừa**).
-5. **Đối chiếu toàn bộ 23 hạng mục:**
-   1. SHIPPER với dữ liệu chuẩn.(Lấy SHIPPER riêng từng file, dừng tại nhãn kế tiếp; không lấy số tiền hoặc INCOTERMS. Không coi SHIPPER lặp ở nhiều invoice là sai.) 2. CONSIGNEE. 3. NOTIFY PARTY 1. 4. NOTIFY PARTY 2. 5. DELIVERY TO. 6. CONTAINER NO. 7. SEAL NO. 8. CONTAINER TYPE. 9. P'KGS. 10. WEIGHT (WEIGHT phải lấy từ dòng TOTAL WEIGHT/TOTAL GROSS WEIGHT nếu có. Không suy WEIGHT từ P'KGS. Nếu không có, cộng tất cả WEIGHT của từng container/invoice.). 11. MEASUREMENT/M3. 12. Tổng P'KGS, WEIGHT và MEASUREMENT/M3. 13. GOODS DESCRIPTION. 14. PORT OF LOADING. 15. PORT OF DISCHARGE. 16. PLACE OF DELIVERY. 17. ETD (ETD trên Check List ↔ On-Board Date/ETD trên BL). 18. ISSUE DATE = ETD (ETD trên Check List ↔ Ngày phát hành trong ô PLACE AND DATE OF ISSUE trên BL; tuyệt đối không lấy trường DATE ở đầu trang Check List). 19. Tổng số container + loại container. 20. Delivery term (CY-CY, CY-DOOR, CFS-CFS, CFS-DOOR). 21. SHIPMENT NO. 22. B/L REQUIRED. 23. HS code (BL không được hiển thị HS code, nếu có là **SAI**).
+# Danh sách 23 hạng mục bắt buộc kiểm tra (giữ đúng STT 1 -> 23)
+1. SHIPPER. 2. CONSIGNEE. 3. NOTIFY PARTY 1. 4. NOTIFY PARTY 2. 5. DELIVERY TO. 6. CONTAINER NO. 7. SEAL NO. 8. CONTAINER TYPE. 9. P'KGS. 10. WEIGHT. 11. MEASUREMENT/M3. 12. Tổng P'KGS, WEIGHT và MEASUREMENT/M3. 13. GOODS DESCRIPTION. 14. PORT OF LOADING. 15. PORT OF DISCHARGE. 16. PLACE OF DELIVERY. 17. ETD. 18. ISSUE DATE = ETD. 19. Tổng số container + loại container. 20. Delivery term. 21. SHIPMENT NO. 22. B/L REQUIRED. 23. HS code.
 
 # Định dạng đầu ra (Báo cáo dạng Bảng Markdown)
-
-Báo cáo kết quả rõ ràng theo đúng 2 phần:
 
 ## 1. TỔNG HỢP ĐIỂM ĐÚNG
 | STT | Hạng mục check | Dữ liệu BL Check List | Dữ liệu BL | Kết quả |
 |---|---|---|---|---|
 | ... | ... | ... | ... | **ĐÚNG** |
 
-*(Với hạng mục container, mỗi container và thuộc tính là một dòng riêng. Cuối bảng ghi rõ: **Tổng số điểm đúng: X**)*
+*(Mỗi hạng mục ĐÚNG từ 1 đến 23 trình bày gọn thành 1 dòng theo đúng STT. Cuối bảng ghi rõ: **Tổng số điểm đúng: X**)*
 
 ---
 
@@ -106,7 +92,7 @@ Báo cáo kết quả rõ ràng theo đúng 2 phần:
 |---|---|---|---|---|---|
 | ... | ... | ... | ... | **SAI** / **KHÔNG TÌM THẤY** / **KHÔNG HIỂU** | ... |
 
-*(In đậm phần khác biệt. Cuối bảng tổng hợp rõ: **Tổng số điểm SAI: X | KHÔNG TÌM THẤY: Y | KHÔNG HIỂU: Z**)*
+*(Chỉ liệt kê các hạng mục SAI / KHÔNG TÌM THẤY / KHÔNG HIỂU. Cuối bảng ghi rõ: **Tổng số điểm SAI: X | KHÔNG TÌM THẤY: Y | KHÔNG HIỂU: Z**)*
 """
 
 
@@ -342,10 +328,34 @@ def _row_to_skill(row: dict) -> Skill:
     )
 
 
+_sqlite_initialized = False
+
 # --- SQLite Fallback Helpers ---
 def _sqlite_get_connection():
+    global _sqlite_initialized
     from shared.sqlite_db import get_sqlite_connection
-    return get_sqlite_connection()
+    conn = get_sqlite_connection()
+    if not _sqlite_initialized:
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            for s in BASE_SKILLS:
+                conn.execute(
+                    """
+                    UPDATE skills
+                    SET name = ?, description = ?, type = ?, system_prompt_addon = ?,
+                        temperature_override = ?, top_k_override = ?, icon = ?, updated_at = ?
+                    WHERE id = ? AND is_system = 1
+                    """,
+                    (
+                        s["name"], s["description"], s["type"], s["prompt"],
+                        s["temp"], s["top_k"], s["icon"], now, s["id"],
+                    ),
+                )
+            conn.commit()
+            _sqlite_initialized = True
+        except Exception:
+            pass
+    return conn
 
 
 def get_skill(skill_id: str) -> Optional[Skill]:
