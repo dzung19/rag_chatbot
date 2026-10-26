@@ -590,12 +590,27 @@ def clean_shipping_context_for_llm(checklist_text: str, bl_text: str) -> tuple[s
         cl,
         flags=re.M | re.I,
     )
-    # Remove incomplete per-page container tables on Check List (which show N/A for cross-page split containers)
+    # Replace incomplete per-page container tables on Check List with assembled full summary
     cl = re.sub(
         r"\n*### \[BẢNG CONTAINER BÓC TÁCH TỰ ĐỘNG - TRANG \d+\]\n(?:\|[^\n]*\n)+",
         "\n",
         cl,
     )
+    cl_conts = extract_document_containers(checklist_text, is_checklist=True)
+    if cl_conts:
+        cl_pkgs_str = ", ".join(str(c["pkgs_num"]) for c in cl_conts)
+        cl_w_str = ", ".join(c["weight_raw"] for c in cl_conts)
+        cl_c_str = ", ".join(c["cbm_raw"] for c in cl_conts)
+        cl_tot_p = sum(c["pkgs_num"] for c in cl_conts)
+        cl_tot_w = sum(c["weight_num"] for c in cl_conts)
+        cl_tot_c = sum(c["cbm_num"] for c in cl_conts)
+        cl += (
+            f"\n\n### [BẢNG CONTAINER VÀ TỔNG HỢP TRÊN B/L CHECK LIST (ĐÃ GHÉP ĐỦ TRANG)]\n"
+            f"- Danh sách {len(cl_conts)} Container: {', '.join(c['container_no'] for c in cl_conts)} (Loại: 40HC, Term: CY-CY)\n"
+            f"- P'KGS từng container: {cl_pkgs_str} PKGS (Tổng P'KGS: {cl_tot_p} PKGS)\n"
+            f"- WEIGHT từng container: {cl_w_str} (Tổng Gross Weight: {cl_tot_w:,.1f} KGS)\n"
+            f"- MEASUREMENT từng container: {cl_c_str} (Tổng Measurement: {cl_tot_c:.3f} CBM)\n"
+        )
 
     bl = bl_text
     # 2. Remove Carrier's legal fine print on BL Page 1 to save ~3,000 chars of noise
@@ -720,16 +735,24 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
             f"BL = `40' HIGH CUBE ({cl_types_norm})` => Kết quả: **{'ĐÚNG' if all_type_ok else 'SAI'}** (Bảng 1)."
         )
         lines.append(
-            f"- Hạng mục 9 (`P'KGS` - 1 dòng): BL Check List = `{cl_pkgs_list} (Tổng: {cl_tot_pkgs} PKGS)` | "
-            f"BL = `{bl_pkgs_list} (Tổng: {bl_tot_pkgs} CARTONS)` => Kết quả: **{'ĐÚNG' if all_pkgs_ok else 'SAI'}** (Bảng 1)."
+            f"- Hạng mục 9 (`P'KGS` - trình bày gộp trên 1 dòng duy nhất): "
+            f"Cột `Dữ liệu BL Check List` ghi `{cl_pkgs_list} (Tổng: {cl_tot_pkgs} PKGS)` | "
+            f"Cột `Dữ liệu BL` ghi `{bl_pkgs_list} (Tổng: {bl_tot_pkgs} CARTONS)` => Kết quả bắt buộc: **{'ĐÚNG' if all_pkgs_ok else 'SAI'}** (Bảng 1, không đưa vào Bảng 2)."
         )
         lines.append(
-            f"- Hạng mục 10 (`WEIGHT`) & 11 (`MEASUREMENT/M3`): Weight = `{cl_w_list}` vs `{bl_w_list}` (**{'ĐÚNG' if all_w_ok else 'SAI'}**); "
-            f"Measurement = `{cl_c_list}` vs `{bl_c_list}` (**{'ĐÚNG' if all_c_ok else 'SAI'}**)."
+            f"- Hạng mục 10 (`WEIGHT` - trình bày gộp trên 1 dòng duy nhất): "
+            f"Cột `Dữ liệu BL Check List` ghi `{cl_w_list}` | "
+            f"Cột `Dữ liệu BL` ghi `{bl_w_list}` => Kết quả bắt buộc: **{'ĐÚNG' if all_w_ok else 'SAI'}** (Bảng 1, không đưa vào Bảng 2)."
         )
         lines.append(
-            f"- Hạng mục 12 (`Tổng P'KGS, WEIGHT và MEASUREMENT/M3`): BL Check List = `{cl_tot_pkgs} PKGS / {cl_tot_w:,.1f} KGS / {cl_tot_c:.3f} M3` | "
-            f"BL = `{bl_tot_pkgs} CARTONS / {bl_tot_w:,.3f} KGS / {bl_tot_c:.3f} CBM` => Kết quả: **{'ĐÚNG' if (all_pkgs_ok and all_w_ok and all_c_ok) else 'SAI'}** (Bảng 1)."
+            f"- Hạng mục 11 (`MEASUREMENT/M3` - trình bày gộp trên 1 dòng duy nhất): "
+            f"Cột `Dữ liệu BL Check List` ghi `{cl_c_list}` | "
+            f"Cột `Dữ liệu BL` ghi `{bl_c_list}` => Kết quả bắt buộc: **{'ĐÚNG' if all_c_ok else 'SAI'}** (Bảng 1, không đưa vào Bảng 2)."
+        )
+        lines.append(
+            f"- Hạng mục 12 (`Tổng P'KGS, WEIGHT và MEASUREMENT/M3`): "
+            f"Cột `Dữ liệu BL Check List` ghi `{cl_tot_pkgs} PKGS / {cl_tot_w:,.1f} KGS / {cl_tot_c:.3f} M3` | "
+            f"Cột `Dữ liệu BL` ghi `{bl_tot_pkgs} CARTONS / {bl_tot_w:,.3f} KGS / {bl_tot_c:.3f} CBM` => Kết quả bắt buộc: **{'ĐÚNG' if (all_pkgs_ok and all_w_ok and all_c_ok) else 'SAI'}** (Bảng 1, không đưa vào Bảng 2)."
         )
 
         desc_res = extract_goods_descriptions_comparison(checklist_text, bl_text)

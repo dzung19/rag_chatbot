@@ -57,8 +57,10 @@ BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, H
 - `NOTIFY PARTY 2` ↔ `ALSO NOTIFY PARTY` (Hạng mục 4).
 - **Số bill và invoice**: Kiểm tra số bill tại `BILL OF LADING (AIR WAYBILL)` khớp BL; tại trang `G-TOTAL` kiểm tra đủ toàn bộ invoice (dạng `824957-0 1` hiểu là `-0` và `-1`).
 - **Hạng mục 8 (`CONTAINER TYPE`)**: Các cách ghi cùng loại container như `40HC`, `40HQ`, `40' HIGH CUBE`, `40HC:40FT 9FT 6IN DRY CONTAINER` là tương đương → **ĐÚNG** (trình bày gộp 1 dòng).
-- **Hạng mục 9 (`P'KGS`)**: Trình bày toàn bộ các container gộp trên **1 dòng duy nhất**. Trên BL Check List lấy Cột 2 của `S-TOTAL` (`P'KGS`), không lấy Cột 1 (`SETS`). Đơn vị `PKGS` và `CARTON(S)` là tương đương.
-- **Hạng mục 10 (`WEIGHT`) & 11 (`MEASUREMENT/M3`)**: Lấy từ `S-TOTAL`/`TOTAL GROSS WEIGHT` từng container và tổng `G-TOTAL`/`TOTAL` (Hạng mục 12). Không suy WEIGHT từ P'KGS.
+- **Hạng mục 9 (`P'KGS`)**: Trình bày toàn bộ các container gộp trên **1 dòng duy nhất**. Cột `Dữ liệu BL Check List` ghi số kiện từng container và tổng PKGS; Cột `Dữ liệu BL` ghi số kiện từng container và tổng CARTONS. Hai bên khớp số kiện kết luận **ĐÚNG** (Bảng 1).
+- **Hạng mục 10 (`WEIGHT`)**: Trình bày toàn bộ các container gộp trên **1 dòng duy nhất**. Cột `Dữ liệu BL Check List` ghi trọng lượng từng container (KGS); Cột `Dữ liệu BL` ghi trọng lượng từng container (KGS). Hai bên khớp nhau kết luận **ĐÚNG** (Bảng 1).
+- **Hạng mục 11 (`MEASUREMENT/M3`)**: Trình bày toàn bộ các container gộp trên **1 dòng duy nhất**. Cột `Dữ liệu BL Check List` ghi thể tích từng container (M3/CBM); Cột `Dữ liệu BL` ghi thể tích từng container (CBM). Hai bên khớp nhau kết luận **ĐÚNG** (Bảng 1).
+- **Hạng mục 12 (`Tổng P'KGS, WEIGHT và MEASUREMENT/M3`)**: Trình bày tổng P'KGS, Gross Weight và Measurement của toàn bộ lô hàng trên 1 dòng duy nhất. Khớp nhau kết luận **ĐÚNG** (Bảng 1).
 - **Hạng mục 13 (`GOODS DESCRIPTION`)**:
   - 4.1. Lấy các dòng mô tả hàng hóa từ dưới `INVOICE NO.` đến ngay trên dòng `TTL` đầu tiên của từng invoice trên Check List.
   - 4.2. Gộp tất cả invoice và loại trùng để có **danh sách chuẩn duy nhất**.
