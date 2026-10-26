@@ -13,7 +13,7 @@
 .composerWrapper {
   pointer-events: auto;
   width: 100%;
-  max-width: 1140px;
+  max-width: 768px;
   background-color: var(--surface-composer);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-pill);
@@ -170,7 +170,7 @@
   font-size: var(--text-xs);
   color: var(--text-muted);
   width: 100%;
-  max-width: 1140px;
+  max-width: 768px;
   user-select: none;
 }
 
