@@ -292,26 +292,44 @@ def _parse_num_val(raw: str) -> float:
 
 def extract_document_containers(full_text: str, is_checklist: bool = False) -> list[dict[str, Any]]:
     """Extract all containers across the entire multi-page document (resolving page-split S-TOTALs)."""
-    # Strip auto-generated markdown tables so we don't double-match container IDs inside them
+    # 1. Strip auto-generated markdown tables (both ### heading form and chunker breadcrumb form)
+    #    and FORM BOXES section so we never double-match container IDs before the actual cargo table.
     clean_text = re.sub(
         r"### \[BẢNG CONTAINER BÓC TÁCH TỰ ĐỘNG[^\n]*\n(?:\|[^\n]*\n)+",
         "",
         full_text,
     )
+    clean_text = re.sub(
+        r"### \[THÔNG TIN Ô BIỂU MẪU \(FORM BOXES\)\]\n(?:- \*\*[^\n]*\n)+",
+        "",
+        clean_text,
+    )
+    # Also strip any markdown table row that starts with '| <idx> | <CONT_NO> |' from chunked tables
+    clean_text = re.sub(
+        r"^\|\s*(?:\d+|\*\*TỔNG\*\*)\s*\|[^\n]*$",
+        "",
+        clean_text,
+        flags=re.M,
+    )
 
     cont_re = re.compile(r"\b([A-Z]{4}\d{7})\b")
     matches = list(cont_re.finditer(clean_text))
     containers: list[dict[str, Any]] = []
-    seen_conts: set[str] = set()
+    seen_conts: dict[str, int] = {}
 
     for idx, m in enumerate(matches):
         c_no = m.group(1).upper()
-        if c_no in seen_conts:
-            continue
 
         start = m.start()
-        if idx + 1 < len(matches):
-            end = matches[idx + 1].start()
+        # Find the next match that has a DIFFERENT container number so duplicate header mentions don't truncate the block
+        next_diff_start = None
+        for next_m in matches[idx + 1 :]:
+            if next_m.group(1).upper() != c_no:
+                next_diff_start = next_m.start()
+                break
+
+        if next_diff_start is not None:
+            end = next_diff_start
         else:
             rest = clean_text[start:]
             term_m = re.search(
@@ -327,8 +345,9 @@ def extract_document_containers(full_text: str, is_checklist: bool = False) -> l
         block = clean_text[prefix_start:end]
         strict_block = clean_text[start:end]
 
+        # Match S-TOTAL whether columns are separated by pipes '|' or spaces (e.g. native PyMuPDF text)
         stot_m = re.search(
-            r"S-TOTAL\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)",
+            r"S-TOTAL(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)",
             strict_block,
             re.I,
         )
@@ -340,21 +359,40 @@ def extract_document_containers(full_text: str, is_checklist: bool = False) -> l
             cbm_raw = f"{stot_m.group(4).strip()} CBM"
         else:
             p_m = re.search(
-                r"(\d[\d,.]*)\s*(packages?|pkgs?|pallets?|cartons?|ctns?|bags?|drums?|pcs|units?)(?:\(s\))?",
+                r"(?<![A-Z0-9])(\d[\d,.]*)\s*(packages?|pkgs?|pallets?|cartons?|ctns?|bags?|drums?|pcs|units?)(?:\(s\))?",
                 strict_block,
                 re.I,
             )
             pkgs_raw = f"{p_m.group(1)} {p_m.group(2).upper()}" if p_m else "N/A"
 
-            w_m = re.search(r"(\d[\d,.]*)\s*(?:kgs?|kg)\b", strict_block, re.I) or re.search(
-                r"(?:kgs?|kg)\b[:\s]*(\d[\d,.]*)", strict_block, re.I
+            # Same-line '<num> KGS' or multi-line 'kgs.\n <num>' (native PyMuPDF layout)
+            w_m = re.search(r"(?<![A-Z0-9])(\d[\d,.]*)[ \t|]*(?:kgs?|kg)\b", strict_block, re.I) or re.search(
+                r"\b(?:kgs?|kg)\.?\s*[:|]?\s*(\d[\d,.]*)", strict_block, re.I
             )
             weight_raw = f"{w_m.group(1).rstrip('.')} KGS" if w_m else "N/A"
 
-            c_m = re.search(r"(\d[\d,.]*)\s*(?:cbm|m3|mtq|cu\.?\s*m\.?)\b", strict_block, re.I) or re.search(
-                r"(?:cbm|m3|mtq|cu\.?\s*m\.?)\b[:\s]*(\d[\d,.]*)", strict_block, re.I
-            )
+            # Same-line '<num> CBM/cu.m.' or multi-line 'cu. m.\n <num>' (native PyMuPDF layout)
+            c_m = re.search(
+                r"(?<![A-Z0-9])(\d[\d,.]*)[ \t|]*(?:cbm|m3|mtq|cu\.?\s*m\.?)(?:\b|$)", strict_block, re.I
+            ) or re.search(r"\b(?:cbm|m3|mtq|cu\.?\s*m\.?)\s*[:|]?\s*(\d[\d,.]*)", strict_block, re.I)
             cbm_raw = f"{c_m.group(1).rstrip('.')} CBM" if c_m else "N/A"
+
+            # Fallback for Checklist: sum item rows `(0001) ... <sets> <pkgs> <weight> <cbm>` if S-TOTAL was cut off
+            if is_checklist and (pkgs_raw == "N/A" or weight_raw == "N/A"):
+                item_rows = re.findall(
+                    r"\(\d{4}\)\s+[^\n]+?(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)\s*$",
+                    strict_block,
+                    flags=re.M,
+                )
+                if item_rows:
+                    sum_sets = int(round(sum(_parse_num_val(r[0]) for r in item_rows)))
+                    sum_pkgs = int(round(sum(_parse_num_val(r[1]) for r in item_rows)))
+                    sum_w = round(sum(_parse_num_val(r[2]) for r in item_rows), 1)
+                    sum_c = round(sum(_parse_num_val(r[3]) for r in item_rows), 3)
+                    sets_raw = str(sum_sets)
+                    pkgs_raw = f"{sum_pkgs} PKGS"
+                    weight_raw = f"{sum_w:,.1f} KGS"
+                    cbm_raw = f"{sum_c:.3f} CBM"
 
         s_m = re.search(
             r"(?:Carrier|Seal\s*(?:Number|No\.?)?[:\s|]*Carrier?|SEAL\s*NO\.?[:\s|]*)\s+([A-Z0-9\-]{5,20})",
@@ -404,23 +442,30 @@ def extract_document_containers(full_text: str, is_checklist: bool = False) -> l
             movement = f"{orig_term}-{dest_term}"
 
         if weight_raw != "N/A" or pkgs_raw != "N/A" or seal_no != "N/A":
-            seen_conts.add(c_no)
-            containers.append(
-                {
-                    "container_no": c_no,
-                    "seal_no": seal_no,
-                    "sets_raw": sets_raw,
-                    "pkgs_num": int(round(_parse_num_val(pkgs_raw))),
-                    "pkgs_raw": pkgs_raw,
-                    "type": cont_type,
-                    "movement": movement,
-                    "movement_raw": movement_raw,
-                    "weight_num": round(_parse_num_val(weight_raw), 3),
-                    "weight_raw": weight_raw,
-                    "cbm_num": round(_parse_num_val(cbm_raw), 4),
-                    "cbm_raw": cbm_raw,
-                }
-            )
+            entry = {
+                "container_no": c_no,
+                "seal_no": seal_no,
+                "sets_raw": sets_raw,
+                "pkgs_num": int(round(_parse_num_val(pkgs_raw))),
+                "pkgs_raw": pkgs_raw,
+                "type": cont_type,
+                "movement": movement,
+                "movement_raw": movement_raw,
+                "weight_num": round(_parse_num_val(weight_raw), 3),
+                "weight_raw": weight_raw,
+                "cbm_num": round(_parse_num_val(cbm_raw), 4),
+                "cbm_raw": cbm_raw,
+            }
+            if c_no in seen_conts:
+                prev_idx = seen_conts[c_no]
+                prev = containers[prev_idx]
+                if (prev["pkgs_raw"] == "N/A" or prev["weight_raw"] == "N/A") and (
+                    pkgs_raw != "N/A" and weight_raw != "N/A"
+                ):
+                    containers[prev_idx] = entry
+            else:
+                seen_conts[c_no] = len(containers)
+                containers.append(entry)
 
     return containers
 
@@ -598,19 +643,20 @@ def clean_shipping_context_for_llm(checklist_text: str, bl_text: str) -> tuple[s
     )
     cl_conts = extract_document_containers(checklist_text, is_checklist=True)
     if cl_conts:
-        cl_pkgs_str = ", ".join(str(c["pkgs_num"]) for c in cl_conts)
-        cl_w_str = ", ".join(c["weight_raw"] for c in cl_conts)
-        cl_c_str = ", ".join(c["cbm_raw"] for c in cl_conts)
         cl_tot_p = sum(c["pkgs_num"] for c in cl_conts)
         cl_tot_w = sum(c["weight_num"] for c in cl_conts)
         cl_tot_c = sum(c["cbm_num"] for c in cl_conts)
-        cl += (
-            f"\n\n### [BẢNG CONTAINER VÀ TỔNG HỢP TRÊN B/L CHECK LIST (ĐÃ GHÉP ĐỦ TRANG)]\n"
-            f"- Danh sách {len(cl_conts)} Container: {', '.join(c['container_no'] for c in cl_conts)} (Loại: 40HC, Term: CY-CY)\n"
-            f"- P'KGS từng container: {cl_pkgs_str} PKGS (Tổng P'KGS: {cl_tot_p} PKGS)\n"
-            f"- WEIGHT từng container: {cl_w_str} (Tổng Gross Weight: {cl_tot_w:,.1f} KGS)\n"
-            f"- MEASUREMENT từng container: {cl_c_str} (Tổng Measurement: {cl_tot_c:.3f} CBM)\n"
-        )
+        if cl_tot_p > 0 and cl_tot_w > 0:
+            cl_pkgs_str = ", ".join(str(c["pkgs_num"]) for c in cl_conts)
+            cl_w_str = ", ".join(c["weight_raw"] for c in cl_conts)
+            cl_c_str = ", ".join(c["cbm_raw"] for c in cl_conts)
+            cl += (
+                f"\n\n### [BẢNG CONTAINER VÀ TỔNG HỢP TRÊN B/L CHECK LIST (ĐÃ GHÉP ĐỦ TRANG)]\n"
+                f"- Danh sách {len(cl_conts)} Container: {', '.join(c['container_no'] for c in cl_conts)} (Loại: 40HC, Term: CY-CY)\n"
+                f"- P'KGS từng container: {cl_pkgs_str} PKGS (Tổng P'KGS: {cl_tot_p} PKGS)\n"
+                f"- WEIGHT từng container: {cl_w_str} (Tổng Gross Weight: {cl_tot_w:,.1f} KGS)\n"
+                f"- MEASUREMENT từng container: {cl_c_str} (Tổng Measurement: {cl_tot_c:.3f} CBM)\n"
+            )
 
     bl = bl_text
     # 2. Remove Carrier's legal fine print on BL Page 1 to save ~3,000 chars of noise
@@ -663,6 +709,31 @@ def clean_shipping_context_for_llm(checklist_text: str, bl_text: str) -> tuple[s
         r"Nơi phát hành = `\*\*Date Laden on Board / On Board Date\*\*`",
         "Nơi phát hành = `MSC Ha Noi`",
         bl,
+    )
+    # Strip form clause boilerplate in 5. Place of Receipt, 6. Ocean Vessel, and 9. Place of Delivery
+    bl = re.sub(
+        r"(- \*\*5\. Place of Receipt\*\*:\s*)\(Combined Transport ONLY[^)]*\)\s*\|\s*",
+        r"\1",
+        bl,
+        flags=re.I,
+    )
+    bl = re.sub(
+        r"(- \*\*6\. Ocean Vessel / Voy\. No\.\*\*:\s*)(?:AND VOYAGE NO\s*)?\(see Clause[^)]*\)\s*\|\s*",
+        r"\1",
+        bl,
+        flags=re.I,
+    )
+    bl = re.sub(
+        r"(- \*\*9\. Place of Delivery\*\*:\s*)\(Combined Transport ONLY[^)]*\)\s*$",
+        r"\1N/A (Trống / Không có dữ liệu trên BL)",
+        bl,
+        flags=re.M | re.I,
+    )
+    bl = re.sub(
+        r"(BOOKING REF\.[^\n]*\|\s*PORT OF DISCHARGE\s*\|\s*PLACE OF DELIVERY[^\n]*\n\s*[A-Z0-9]+\s*\|\s*[A-Z\s]+?)\s*$",
+        r"\1 | [PLACE OF DELIVERY: TRỐNG / N/A]",
+        bl,
+        flags=re.M | re.I,
     )
     return cl.strip(), bl.strip()
 
@@ -734,26 +805,27 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
             f"- Hạng mục 8 (`CONTAINER TYPE` - 1 dòng): BL Check List = `40HC:40FT 9FT 6IN DRY CONTAINER ({cl_types_norm})` | "
             f"BL = `40' HIGH CUBE ({cl_types_norm})` => Kết quả: **{'ĐÚNG' if all_type_ok else 'SAI'}** (Bảng 1)."
         )
-        lines.append(
-            f"- Hạng mục 9 (`P'KGS` - trình bày gộp trên 1 dòng duy nhất): "
-            f"Cột `Dữ liệu BL Check List` ghi `{cl_pkgs_list} (Tổng: {cl_tot_pkgs} PKGS)` | "
-            f"Cột `Dữ liệu BL` ghi `{bl_pkgs_list} (Tổng: {bl_tot_pkgs} CARTONS)` => Kết quả bắt buộc: **{'ĐÚNG' if all_pkgs_ok else 'SAI'}** (Bảng 1, không đưa vào Bảng 2)."
-        )
-        lines.append(
-            f"- Hạng mục 10 (`WEIGHT` - trình bày gộp trên 1 dòng duy nhất): "
-            f"Cột `Dữ liệu BL Check List` ghi `{cl_w_list}` | "
-            f"Cột `Dữ liệu BL` ghi `{bl_w_list}` => Kết quả bắt buộc: **{'ĐÚNG' if all_w_ok else 'SAI'}** (Bảng 1, không đưa vào Bảng 2)."
-        )
-        lines.append(
-            f"- Hạng mục 11 (`MEASUREMENT/M3` - trình bày gộp trên 1 dòng duy nhất): "
-            f"Cột `Dữ liệu BL Check List` ghi `{cl_c_list}` | "
-            f"Cột `Dữ liệu BL` ghi `{bl_c_list}` => Kết quả bắt buộc: **{'ĐÚNG' if all_c_ok else 'SAI'}** (Bảng 1, không đưa vào Bảng 2)."
-        )
-        lines.append(
-            f"- Hạng mục 12 (`Tổng P'KGS, WEIGHT và MEASUREMENT/M3`): "
-            f"Cột `Dữ liệu BL Check List` ghi `{cl_tot_pkgs} PKGS / {cl_tot_w:,.1f} KGS / {cl_tot_c:.3f} M3` | "
-            f"Cột `Dữ liệu BL` ghi `{bl_tot_pkgs} CARTONS / {bl_tot_w:,.3f} KGS / {bl_tot_c:.3f} CBM` => Kết quả bắt buộc: **{'ĐÚNG' if (all_pkgs_ok and all_w_ok and all_c_ok) else 'SAI'}** (Bảng 1, không đưa vào Bảng 2)."
-        )
+        if cl_tot_pkgs > 0 and cl_tot_w > 0 and bl_tot_pkgs > 0 and bl_tot_w > 0:
+            lines.append(
+                f"- Hạng mục 9 (`P'KGS` - trình bày gộp trên 1 dòng duy nhất): "
+                f"Cột `Dữ liệu BL Check List` ghi `{cl_pkgs_list} (Tổng: {cl_tot_pkgs} PKGS)` | "
+                f"Cột `Dữ liệu BL` ghi `{bl_pkgs_list} (Tổng: {bl_tot_pkgs} CARTONS)` => Kết quả bắt buộc: **{'ĐÚNG' if all_pkgs_ok else 'SAI'}** (Bảng 1, không đưa vào Bảng 2)."
+            )
+            lines.append(
+                f"- Hạng mục 10 (`WEIGHT` - trình bày gộp trên 1 dòng duy nhất): "
+                f"Cột `Dữ liệu BL Check List` ghi `{cl_w_list}` | "
+                f"Cột `Dữ liệu BL` ghi `{bl_w_list}` => Kết quả bắt buộc: **{'ĐÚNG' if all_w_ok else 'SAI'}** (Bảng 1, không đưa vào Bảng 2)."
+            )
+            lines.append(
+                f"- Hạng mục 11 (`MEASUREMENT/M3` - trình bày gộp trên 1 dòng duy nhất): "
+                f"Cột `Dữ liệu BL Check List` ghi `{cl_c_list}` | "
+                f"Cột `Dữ liệu BL` ghi `{bl_c_list}` => Kết quả bắt buộc: **{'ĐÚNG' if all_c_ok else 'SAI'}** (Bảng 1, không đưa vào Bảng 2)."
+            )
+            lines.append(
+                f"- Hạng mục 12 (`Tổng P'KGS, WEIGHT và MEASUREMENT/M3`): "
+                f"Cột `Dữ liệu BL Check List` ghi `{cl_tot_pkgs} PKGS / {cl_tot_w:,.1f} KGS / {cl_tot_c:.3f} M3` | "
+                f"Cột `Dữ liệu BL` ghi `{bl_tot_pkgs} CARTONS / {bl_tot_w:,.3f} KGS / {bl_tot_c:.3f} CBM` => Kết quả bắt buộc: **{'ĐÚNG' if (all_pkgs_ok and all_w_ok and all_c_ok) else 'SAI'}** (Bảng 1, không đưa vào Bảng 2)."
+            )
 
         desc_res = extract_goods_descriptions_comparison(checklist_text, bl_text)
         if desc_res:
@@ -786,6 +858,56 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
                 f"BL = `{bl_term_norm}` => Kết quả: **{'ĐÚNG' if term_ok else 'SAI'}** (Bảng 1)."
             )
 
+    # 1.5 Extract Item 15 (PORT OF DISCHARGE) & Item 16 (PLACE OF DELIVERY)
+    cl_to = ""
+    m_to_box = re.search(r"\*\*To \(Request\)\*\*:\s*([^\n|]+)", checklist_text, re.I)
+    if m_to_box:
+        cl_to = m_to_box.group(1).strip()
+    if not cl_to:
+        m_to_col = re.search(
+            r"\bTO(?:\s*\|\s*|\s+)ETA\b[^\n]*\n\s*([^\n|]+?)(?:\s*\|\s*|\s{2,})\d{4}",
+            checklist_text,
+            re.I,
+        )
+        if m_to_col:
+            cl_to = m_to_col.group(1).strip()
+
+    bl_podeliv = ""
+    m_podeliv_box = re.search(r"\*\*9\. Place of Delivery\*\*:\s*([^\n]+)", bl_text, re.I)
+    if m_podeliv_box:
+        raw_podeliv = m_podeliv_box.group(1).strip()
+        raw_podeliv = re.sub(r"\(\s*(?:Combined\s+Transport\s+ONLY|see\s+Clause)[^)]*\)", "", raw_podeliv, flags=re.I)
+        raw_podeliv = re.sub(r"\bN/A\b.*", "", raw_podeliv, flags=re.I)
+        raw_podeliv = raw_podeliv.replace("|", " ").strip(" :.-*\t")
+        if raw_podeliv:
+            bl_podeliv = raw_podeliv
+    else:
+        m_podeliv_line = re.search(
+            r"BOOKING\s+REF\.[^\n]*\|\s*PORT\s+OF\s+DISCHARGE\s*\|\s*PLACE\s+OF\s+DELIVERY[^\n]*\n\s*([^\n]+)",
+            bl_text,
+            re.I,
+        )
+        if m_podeliv_line:
+            cols = [c.strip() for c in m_podeliv_line.group(1).split("|") if c.strip()]
+            # If only 2 columns exist (<Booking Ref> | <Port of Discharge>), Place of Delivery is blank
+            if len(cols) >= 3 and not re.search(r"TRỐNG|N/A|^X{4,}$", cols[-1], re.I):
+                bl_podeliv = cols[-1]
+
+    if cl_to:
+        if not bl_podeliv:
+            lines.append(
+                f"- Hạng mục 16 (`PLACE OF DELIVERY`): Cột `Dữ liệu BL Check List` = `{cl_to}` (trường `TO`) | "
+                f"Cột `Dữ liệu BL` = `N/A (Không có dữ liệu)` (ô `PLACE OF DELIVERY` trên BL để trống; lưu ý `{cl_to}` trên BL là `PORT OF DISCHARGE`, không phải `PLACE OF DELIVERY`) => "
+                f"Kết quả bắt buộc: **KHÔNG TÌM THẤY** (đưa vào Bảng 2 - ĐIỂM CẦN XỬ LÝ, tuyệt đối không đưa vào Bảng 1)."
+            )
+        else:
+            podeliv_ok = cl_to.upper() == bl_podeliv.upper()
+            lines.append(
+                f"- Hạng mục 16 (`PLACE OF DELIVERY`): Cột `Dữ liệu BL Check List` = `{cl_to}` | "
+                f"Cột `Dữ liệu BL` = `{bl_podeliv}` => Kết quả bắt buộc: **{'ĐÚNG' if podeliv_ok else 'SAI'}** "
+                f"({'Bảng 1' if podeliv_ok else 'Bảng 2'})."
+            )
+
     # 2. Extract ETD, On-Board Date, and Place/Date of Issue (Items 17 & 18)
     cl_etd_raw: list[str] = []
     m_etd_box = re.search(r"\*\*ETD[^*]*\*\*:\s*([^\n|]+)", checklist_text, re.I)
@@ -795,7 +917,7 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
                 cl_etd_raw.append(d.strip())
 
     m_etd_col = re.search(
-        r"\bFROM\s*\|\s*ETD\b[^\n]*\n\s*([^\n|]+?)\s*\|\s*(\d{4}[./-]\d{2}[./-]\d{2}|\d{1,2}[-\s][A-Za-z]{3,9}[-\s]\d{4})",
+        r"\bFROM(?:\s*\|\s*|\s+)ETD\b[^\n]*\n(?:REQUEST[^\n]*\n)?\s*([^\n|]+?)(?:\s*\|\s*|\s{2,})(\d{4}[./-]\d{2}[./-]\d{2}|\d{1,2}[-\s][A-Za-z]{3,9}[-\s]\d{4})",
         checklist_text,
         re.I,
     )
@@ -864,15 +986,26 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
         if ob_d:
             bl_onboard_date = ob_d[0].strip()
     if not bl_onboard_date:
-        m_ob = re.search(
+        for m_ob in re.finditer(
             r"(?:SHIPPED\s+ON\s+BOARD\s+DATE|Date\s+Laden\s+on\s+Board)[^\n]*\n((?:[^\n]+\n?){1,3})",
             bl_text,
             re.I,
-        )
-        if m_ob:
+        ):
             ob_d = _DATE_TOKEN_RE.findall(m_ob.group(1))
             if ob_d:
                 bl_onboard_date = ob_d[0].strip()
+                break
+    if not bl_onboard_date:
+        # Native PyMuPDF layout where the date is 1-5 lines above 'SHIPPED ON BOARD DATE'
+        for m_ob_before in re.finditer(
+            r"((?:[^\n]+\n){1,5})\s*(?:SHIPPED\s+ON\s+BOARD\s+DATE|Date\s+Laden\s+on\s+Board)\b",
+            bl_text,
+            re.I,
+        ):
+            ob_d = _DATE_TOKEN_RE.findall(m_ob_before.group(1))
+            if ob_d:
+                bl_onboard_date = ob_d[-1].strip()
+                break
 
     bl_onboard_iso = normalize_shipping_date(bl_onboard_date)
 
@@ -931,3 +1064,64 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
     if len(lines) == 1:
         return ""
     return "\n".join(lines)
+
+
+def reconcile_compare_counts(md: str) -> str:
+    """Reconcile table summary counts in business-compare reports to prevent LLM hallucinations."""
+    if not md:
+        return md
+
+    # 1. Table 1 (TỔNG HỢP ĐIỂM ĐÚNG)
+    t1_match = re.search(r"##\s*1\.\s*TỔNG\s*HỢP\s*ĐIỂM\s*ĐÚNG(.*?)(?=##\s*2|\Z)", md, re.DOTALL | re.I)
+    if t1_match:
+        t1_text = t1_match.group(1)
+        t1_rows = [
+            line for line in t1_text.splitlines() 
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"\bSTT\b", line, re.I)
+        ]
+        actual_dung_count = len(t1_rows)
+        if actual_dung_count > 0:
+            new_t1_text = re.sub(
+                r"(\*?\*?Tổng\s+số\s+điểm\s+đúng\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+                lambda m: f"{m.group(1)}{actual_dung_count}{m.group(2) or ''}",
+                t1_text,
+                flags=re.I
+            )
+            md = md[:t1_match.start(1)] + new_t1_text + md[t1_match.end(1):]
+
+    # 2. Table 2 (ĐIỂM CẦN XỬ LÝ)
+    t2_match = re.search(r"##\s*2\.\s*ĐIỂM\s*CẦN\s*XỬ\s*LÝ(.*)", md, re.DOTALL | re.I)
+    if t2_match:
+        t2_text = t2_match.group(1)
+        t2_rows = [
+            line for line in t2_text.splitlines()
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"\bSTT\b", line, re.I)
+        ]
+        
+        sai_count = 0
+        missing_count = 0
+        unknown_count = 0
+        for r in t2_rows:
+            parts = [p.strip() for p in r.split("|")]
+            status_col = parts[5].upper() if len(parts) >= 6 else r.upper()
+            if "KHÔNG TÌM THẤY" in status_col:
+                missing_count += 1
+            elif "KHÔNG HIỂU" in status_col:
+                unknown_count += 1
+            elif "SAI" in status_col:
+                sai_count += 1
+
+        new_t2_text = re.sub(
+            r"(\*?\*?Tổng\s+số\s+điểm\s+SAI\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+TÌM\s+THẤY\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+HIỂU\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+            f"**Tổng số điểm SAI: {sai_count} | KHÔNG TÌM THẤY: {missing_count} | KHÔNG HIỂU: {unknown_count}**",
+            t2_text,
+            flags=re.I
+        )
+        md = md[:t2_match.start(1)] + new_t2_text + md[t2_match.end(1):]
+
+    return md
+

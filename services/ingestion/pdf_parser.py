@@ -732,8 +732,14 @@ def _extract_bl_anchor_boxes(
         if same_line_words and not inline_val:
             same_line_words.sort(key=lambda w: w.x0)
             same_line_val = " ".join(w.text for w in same_line_words).strip()
+            same_line_val = re.sub(
+                r"^(?:AND\s+VOYAGE\s+NO\s*)?\(\s*(?:Combined\s+Transport\s+ONLY|see\s+Clause)[^)]*\)\s*:?\s*",
+                "",
+                same_line_val,
+                flags=re.I,
+            ).strip(" :.-*\t")
             # Ignore sub-labels or connective headers like "(or) SHIPPER'S REF."
-            if same_line_val and not re.search(r"\b(?:or|ref\.?|shipper'?s|freight)\b", same_line_val, re.I):
+            if same_line_val and not re.search(r"\b(?:or|ref\.?|shipper'?s|freight|clause|combined\s+transport)\b", same_line_val, re.I):
                 inline_val = same_line_val
 
         for w in words:
@@ -751,7 +757,8 @@ def _extract_bl_anchor_boxes(
             ln for ln in lines_str
             if not re.match(
                 r"^(?:Insert\s+Name\s+Address|It\s+is\s+agreed\s+that\s+no\s+responsibility|"
-                r"to\s+the\s+Carrier\s+or\s+his\s+agents|Subject\s+to\s+Clause\s+7)",
+                r"to\s+the\s+Carrier\s+or\s+his\s+agents|Subject\s+to\s+Clause\s+7|"
+                r"\(?\s*Combined\s+Transport\s+ONLY|\(?\s*see\s+Clause\s+\d)",
                 ln,
                 re.I,
             )
@@ -775,6 +782,8 @@ def _extract_bl_anchor_boxes(
                 if re.match(r"^BIVN\b", final_val.strip(), re.I):
                     final_val = "BIVN (BROTHER INDUSTRIES (VIETNAM) LTD.)"
             extracted.append((anc["label"], final_val))
+        elif anc["label"] == "9. Place of Delivery":
+            extracted.append((anc["label"], "N/A (Trống / Không có dữ liệu trên BL)"))
 
     return extracted
 
@@ -783,7 +792,7 @@ def _extract_inline_value_from_header(canonical_label: str, raw_header: str) -> 
     """Extract inline values when label and value sit close together on the same line."""
     # Remove known boilerplate instructions inside header
     cleaned = re.sub(
-        r"Insert\s+Name\s+Address\s+and\s+Phone/Fax",
+        r"Insert\s+Name\s+Address\s+and\s+Phone/Fax|\(\s*(?:Combined\s+Transport\s+ONLY|see\s+Clause)[^)]*\)",
         "",
         raw_header,
         flags=re.I,
@@ -940,7 +949,7 @@ def _append_shipping_structured_summary(page_text: str, page_num: int) -> str:
 
             # 1.1 S-TOTAL row (Checklist format: S-TOTAL | <sets> | <pkgs> | <weight> | <cbm>)
             stot_m = re.search(
-                r"S-TOTAL\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)",
+                r"S-TOTAL(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)",
                 block,
                 re.I,
             )
@@ -1055,7 +1064,7 @@ def _append_shipping_structured_summary(page_text: str, page_num: int) -> str:
     first_cont_pos = matches[0].start() if matches else len(page_text)
     header_section = page_text[:first_cont_pos]
     orphan_stot = re.search(
-        r"S-TOTAL\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)",
+        r"S-TOTAL(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)",
         header_section,
         re.I,
     )
@@ -1111,7 +1120,7 @@ def _append_shipping_structured_summary(page_text: str, page_num: int) -> str:
 
     # 5. Grand Total extraction (G-TOTAL / Carrier Total)
     gtot_m = re.search(
-        r"G-TOTAL\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)\s*\|\s*(\d[\d,.]*)",
+        r"G-TOTAL(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)(?:\s*\|\s*|\s+)(\d[\d,.]*)",
         page_text,
         re.I,
     )

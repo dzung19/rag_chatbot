@@ -329,10 +329,16 @@ async def chat_stream(
                     return
 
                 try:
+                    from shared.skills_repo import reconcile_compare_counts
+                    assistant_content = reconcile_compare_counts(assistant_content)
+                except Exception as rec_err:
+                    logger.warning("Error reconciling compare counts: %s", str(rec_err))
+
+                try:
                     complete_response = await client.post(
                         f"{settings.conversation_service_url}/internal/turns/{turn_id}/complete",
                         headers={
-                            "X-Internal-Service-Key": settings.internal_service_key,
+                            "X-Internal-Service-Key": settings.internal_service_key or "",
                         },
                         json={
                             "owner_id": current_user.user_id,

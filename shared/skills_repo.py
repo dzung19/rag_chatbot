@@ -52,7 +52,7 @@ BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, H
 # Quy tắc ánh xạ & nghiệp vụ
 - `FROM` ↔ `PORT OF LOADING` (Hạng mục 14).
 - `VIA` ↔ `PORT OF DISCHARGE` (Hạng mục 15).
-- `TO` ↔ `PLACE OF DELIVERY` (Hạng mục 16).
+- `TO` ↔ `PLACE OF DELIVERY` (Hạng mục 16): Chỉ lấy giá trị thực tế trong ô `PLACE OF DELIVERY` trên BL (bỏ qua dòng chú thích mẫu đơn `(Combined Transport ONLY - see Clause 1 & 5.2)` và tuyệt đối không lấy giá trị của `PORT OF DISCHARGE` gán sang `PLACE OF DELIVERY`). Nếu ô `PLACE OF DELIVERY` trên BL để trống (`N/A`) trong khi Check List có dữ liệu `TO`, bắt buộc kết luận **KHÔNG TÌM THẤY** (đưa vào Bảng 2).
 - `REQUEST NO.` ↔ `SHIPMENT / SHIPMENT NO.` (Hạng mục 21).
 - `NOTIFY PARTY 2` ↔ `ALSO NOTIFY PARTY` (Hạng mục 4).
 - **Số bill và invoice**: Kiểm tra số bill tại `BILL OF LADING (AIR WAYBILL)` khớp BL; tại trang `G-TOTAL` kiểm tra đủ toàn bộ invoice (dạng `824957-0 1` hiểu là `-0` và `-1`).
@@ -83,6 +83,11 @@ BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, H
 | ... | ... | ... | ... | **ĐÚNG** |
 
 *(Mỗi hạng mục ĐÚNG từ 1 đến 23 trình bày gọn thành 1 dòng theo đúng STT. Cuối bảng ghi rõ: **Tổng số điểm đúng: X**)*
+
+# Quy tắc thống kê tổng số điểm
+- Cuối Bảng 1: BẮT BUỘC đếm chính xác số lượng dòng thực tế đã liệt kê trong Bảng 1 để ghi vào **Tổng số điểm đúng: X** (Ví dụ nếu có 19 dòng trong Bảng 1 thì X bắt buộc là 19, tuyệt đối không đoán số).
+- Cuối Bảng 2: BẮT BUỘC đếm chính xác số lượng dòng thực tế theo từng loại kết quả trong Bảng 2 để ghi vào **Tổng số điểm SAI: X | KHÔNG TÌM THẤY: Y | KHÔNG HIỂU: Z**.
+- Tổng số điểm của cả 2 bảng (Đúng + SAI + Không tìm thấy + Không hiểu) phải bằng đúng 23 hạng mục kiểm tra.
 
 ---
 
@@ -389,6 +394,67 @@ def get_skill(skill_id: str) -> Optional[Skill]:
         conn.close()
 
 
+def reconcile_compare_counts(md: str) -> str:
+    """Reconcile table summary counts in business-compare reports to prevent LLM hallucinations."""
+    if not md:
+        return md
+
+    # 1. Table 1 (TỔNG HỢP ĐIỂM ĐÚNG)
+    t1_match = re.search(r"##\s*1\.\s*TỔNG\s*HỢP\s*ĐIỂM\s*ĐÚNG(.*?)(?=##\s*2|\Z)", md, re.DOTALL | re.I)
+    if t1_match:
+        t1_text = t1_match.group(1)
+        t1_rows = [
+            line for line in t1_text.splitlines() 
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"\bSTT\b", line, re.I)
+        ]
+        actual_dung_count = len(t1_rows)
+        if actual_dung_count > 0:
+            new_t1_text = re.sub(
+                r"(\*?\*?Tổng\s+số\s+điểm\s+đúng\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+                lambda m: f"{m.group(1)}{actual_dung_count}{m.group(2) or ''}",
+                t1_text,
+                flags=re.I
+            )
+            md = md[:t1_match.start(1)] + new_t1_text + md[t1_match.end(1):]
+
+    # 2. Table 2 (ĐIỂM CẦN XỬ LÝ)
+    t2_match = re.search(r"##\s*2\.\s*ĐIỂM\s*CẦN\s*XỬ\s*LÝ(.*)", md, re.DOTALL | re.I)
+    if t2_match:
+        t2_text = t2_match.group(1)
+        t2_rows = [
+            line for line in t2_text.splitlines()
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"\bSTT\b", line, re.I)
+        ]
+        
+        sai_count = 0
+        missing_count = 0
+        unknown_count = 0
+        for r in t2_rows:
+            parts = [p.strip() for p in r.split("|")]
+            status_col = parts[5].upper() if len(parts) >= 6 else r.upper()
+            if "KHÔNG TÌM THẤY" in status_col:
+                missing_count += 1
+            elif "KHÔNG HIỂU" in status_col:
+                unknown_count += 1
+            elif "SAI" in status_col:
+                sai_count += 1
+
+        new_t2_text = re.sub(
+            r"(\*?\*?Tổng\s+số\s+điểm\s+SAI\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+TÌM\s+THẤY\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+HIỂU\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+            f"**Tổng số điểm SAI: {sai_count} | KHÔNG TÌM THẤY: {missing_count} | KHÔNG HIỂU: {unknown_count}**",
+            t2_text,
+            flags=re.I
+        )
+        md = md[:t2_match.start(1)] + new_t2_text + md[t2_match.end(1):]
+
+    return md
+
+
+
 def list_skills(skill_type: Optional[SkillType] = None) -> List[Skill]:
     """List all skills, optionally filtered by type (PostgreSQL with SQLite fallback)."""
     if _ensure_pg_skills_table():
@@ -420,6 +486,67 @@ def list_skills(skill_type: Optional[SkillType] = None) -> List[Skill]:
         return [_row_to_skill(dict(r)) for r in rows]
     finally:
         conn.close()
+
+
+def reconcile_compare_counts(md: str) -> str:
+    """Reconcile table summary counts in business-compare reports to prevent LLM hallucinations."""
+    if not md:
+        return md
+
+    # 1. Table 1 (TỔNG HỢP ĐIỂM ĐÚNG)
+    t1_match = re.search(r"##\s*1\.\s*TỔNG\s*HỢP\s*ĐIỂM\s*ĐÚNG(.*?)(?=##\s*2|\Z)", md, re.DOTALL | re.I)
+    if t1_match:
+        t1_text = t1_match.group(1)
+        t1_rows = [
+            line for line in t1_text.splitlines() 
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"\bSTT\b", line, re.I)
+        ]
+        actual_dung_count = len(t1_rows)
+        if actual_dung_count > 0:
+            new_t1_text = re.sub(
+                r"(\*?\*?Tổng\s+số\s+điểm\s+đúng\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+                lambda m: f"{m.group(1)}{actual_dung_count}{m.group(2) or ''}",
+                t1_text,
+                flags=re.I
+            )
+            md = md[:t1_match.start(1)] + new_t1_text + md[t1_match.end(1):]
+
+    # 2. Table 2 (ĐIỂM CẦN XỬ LÝ)
+    t2_match = re.search(r"##\s*2\.\s*ĐIỂM\s*CẦN\s*XỬ\s*LÝ(.*)", md, re.DOTALL | re.I)
+    if t2_match:
+        t2_text = t2_match.group(1)
+        t2_rows = [
+            line for line in t2_text.splitlines()
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"\bSTT\b", line, re.I)
+        ]
+        
+        sai_count = 0
+        missing_count = 0
+        unknown_count = 0
+        for r in t2_rows:
+            parts = [p.strip() for p in r.split("|")]
+            status_col = parts[5].upper() if len(parts) >= 6 else r.upper()
+            if "KHÔNG TÌM THẤY" in status_col:
+                missing_count += 1
+            elif "KHÔNG HIỂU" in status_col:
+                unknown_count += 1
+            elif "SAI" in status_col:
+                sai_count += 1
+
+        new_t2_text = re.sub(
+            r"(\*?\*?Tổng\s+số\s+điểm\s+SAI\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+TÌM\s+THẤY\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+HIỂU\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+            f"**Tổng số điểm SAI: {sai_count} | KHÔNG TÌM THẤY: {missing_count} | KHÔNG HIỂU: {unknown_count}**",
+            t2_text,
+            flags=re.I
+        )
+        md = md[:t2_match.start(1)] + new_t2_text + md[t2_match.end(1):]
+
+    return md
+
 
 
 def create_skill(request: SkillCreateRequest) -> Skill:
@@ -497,6 +624,67 @@ def create_skill(request: SkillCreateRequest) -> Skill:
     finally:
         conn.close()
 
+
+def reconcile_compare_counts(md: str) -> str:
+    """Reconcile table summary counts in business-compare reports to prevent LLM hallucinations."""
+    if not md:
+        return md
+
+    # 1. Table 1 (TỔNG HỢP ĐIỂM ĐÚNG)
+    t1_match = re.search(r"##\s*1\.\s*TỔNG\s*HỢP\s*ĐIỂM\s*ĐÚNG(.*?)(?=##\s*2|\Z)", md, re.DOTALL | re.I)
+    if t1_match:
+        t1_text = t1_match.group(1)
+        t1_rows = [
+            line for line in t1_text.splitlines() 
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"\bSTT\b", line, re.I)
+        ]
+        actual_dung_count = len(t1_rows)
+        if actual_dung_count > 0:
+            new_t1_text = re.sub(
+                r"(\*?\*?Tổng\s+số\s+điểm\s+đúng\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+                lambda m: f"{m.group(1)}{actual_dung_count}{m.group(2) or ''}",
+                t1_text,
+                flags=re.I
+            )
+            md = md[:t1_match.start(1)] + new_t1_text + md[t1_match.end(1):]
+
+    # 2. Table 2 (ĐIỂM CẦN XỬ LÝ)
+    t2_match = re.search(r"##\s*2\.\s*ĐIỂM\s*CẦN\s*XỬ\s*LÝ(.*)", md, re.DOTALL | re.I)
+    if t2_match:
+        t2_text = t2_match.group(1)
+        t2_rows = [
+            line for line in t2_text.splitlines()
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"\bSTT\b", line, re.I)
+        ]
+        
+        sai_count = 0
+        missing_count = 0
+        unknown_count = 0
+        for r in t2_rows:
+            parts = [p.strip() for p in r.split("|")]
+            status_col = parts[5].upper() if len(parts) >= 6 else r.upper()
+            if "KHÔNG TÌM THẤY" in status_col:
+                missing_count += 1
+            elif "KHÔNG HIỂU" in status_col:
+                unknown_count += 1
+            elif "SAI" in status_col:
+                sai_count += 1
+
+        new_t2_text = re.sub(
+            r"(\*?\*?Tổng\s+số\s+điểm\s+SAI\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+TÌM\s+THẤY\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+HIỂU\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+            f"**Tổng số điểm SAI: {sai_count} | KHÔNG TÌM THẤY: {missing_count} | KHÔNG HIỂU: {unknown_count}**",
+            t2_text,
+            flags=re.I
+        )
+        md = md[:t2_match.start(1)] + new_t2_text + md[t2_match.end(1):]
+
+    return md
+
+
     skill = get_skill(skill_id)
     if not skill:
         raise RuntimeError("Failed to retrieve created skill.")
@@ -559,6 +747,67 @@ def update_skill(skill_id: str, request: SkillUpdateRequest) -> Skill:
     finally:
         conn.close()
 
+
+def reconcile_compare_counts(md: str) -> str:
+    """Reconcile table summary counts in business-compare reports to prevent LLM hallucinations."""
+    if not md:
+        return md
+
+    # 1. Table 1 (TỔNG HỢP ĐIỂM ĐÚNG)
+    t1_match = re.search(r"##\s*1\.\s*TỔNG\s*HỢP\s*ĐIỂM\s*ĐÚNG(.*?)(?=##\s*2|\Z)", md, re.DOTALL | re.I)
+    if t1_match:
+        t1_text = t1_match.group(1)
+        t1_rows = [
+            line for line in t1_text.splitlines() 
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"\bSTT\b", line, re.I)
+        ]
+        actual_dung_count = len(t1_rows)
+        if actual_dung_count > 0:
+            new_t1_text = re.sub(
+                r"(\*?\*?Tổng\s+số\s+điểm\s+đúng\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+                lambda m: f"{m.group(1)}{actual_dung_count}{m.group(2) or ''}",
+                t1_text,
+                flags=re.I
+            )
+            md = md[:t1_match.start(1)] + new_t1_text + md[t1_match.end(1):]
+
+    # 2. Table 2 (ĐIỂM CẦN XỬ LÝ)
+    t2_match = re.search(r"##\s*2\.\s*ĐIỂM\s*CẦN\s*XỬ\s*LÝ(.*)", md, re.DOTALL | re.I)
+    if t2_match:
+        t2_text = t2_match.group(1)
+        t2_rows = [
+            line for line in t2_text.splitlines()
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"\bSTT\b", line, re.I)
+        ]
+        
+        sai_count = 0
+        missing_count = 0
+        unknown_count = 0
+        for r in t2_rows:
+            parts = [p.strip() for p in r.split("|")]
+            status_col = parts[5].upper() if len(parts) >= 6 else r.upper()
+            if "KHÔNG TÌM THẤY" in status_col:
+                missing_count += 1
+            elif "KHÔNG HIỂU" in status_col:
+                unknown_count += 1
+            elif "SAI" in status_col:
+                sai_count += 1
+
+        new_t2_text = re.sub(
+            r"(\*?\*?Tổng\s+số\s+điểm\s+SAI\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+TÌM\s+THẤY\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+HIỂU\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+            f"**Tổng số điểm SAI: {sai_count} | KHÔNG TÌM THẤY: {missing_count} | KHÔNG HIỂU: {unknown_count}**",
+            t2_text,
+            flags=re.I
+        )
+        md = md[:t2_match.start(1)] + new_t2_text + md[t2_match.end(1):]
+
+    return md
+
+
     updated = get_skill(skill_id)
     if not updated:
         raise SkillNotFoundError(f"Skill {skill_id} not found.")
@@ -591,6 +840,67 @@ def delete_skill(skill_id: str) -> bool:
         return True
     finally:
         conn.close()
+
+
+def reconcile_compare_counts(md: str) -> str:
+    """Reconcile table summary counts in business-compare reports to prevent LLM hallucinations."""
+    if not md:
+        return md
+
+    # 1. Table 1 (TỔNG HỢP ĐIỂM ĐÚNG)
+    t1_match = re.search(r"##\s*1\.\s*TỔNG\s*HỢP\s*ĐIỂM\s*ĐÚNG(.*?)(?=##\s*2|\Z)", md, re.DOTALL | re.I)
+    if t1_match:
+        t1_text = t1_match.group(1)
+        t1_rows = [
+            line for line in t1_text.splitlines() 
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"\bSTT\b", line, re.I)
+        ]
+        actual_dung_count = len(t1_rows)
+        if actual_dung_count > 0:
+            new_t1_text = re.sub(
+                r"(\*?\*?Tổng\s+số\s+điểm\s+đúng\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+                lambda m: f"{m.group(1)}{actual_dung_count}{m.group(2) or ''}",
+                t1_text,
+                flags=re.I
+            )
+            md = md[:t1_match.start(1)] + new_t1_text + md[t1_match.end(1):]
+
+    # 2. Table 2 (ĐIỂM CẦN XỬ LÝ)
+    t2_match = re.search(r"##\s*2\.\s*ĐIỂM\s*CẦN\s*XỬ\s*LÝ(.*)", md, re.DOTALL | re.I)
+    if t2_match:
+        t2_text = t2_match.group(1)
+        t2_rows = [
+            line for line in t2_text.splitlines()
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"\bSTT\b", line, re.I)
+        ]
+        
+        sai_count = 0
+        missing_count = 0
+        unknown_count = 0
+        for r in t2_rows:
+            parts = [p.strip() for p in r.split("|")]
+            status_col = parts[5].upper() if len(parts) >= 6 else r.upper()
+            if "KHÔNG TÌM THẤY" in status_col:
+                missing_count += 1
+            elif "KHÔNG HIỂU" in status_col:
+                unknown_count += 1
+            elif "SAI" in status_col:
+                sai_count += 1
+
+        new_t2_text = re.sub(
+            r"(\*?\*?Tổng\s+số\s+điểm\s+SAI\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+TÌM\s+THẤY\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+HIỂU\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+            f"**Tổng số điểm SAI: {sai_count} | KHÔNG TÌM THẤY: {missing_count} | KHÔNG HIỂU: {unknown_count}**",
+            t2_text,
+            flags=re.I
+        )
+        md = md[:t2_match.start(1)] + new_t2_text + md[t2_match.end(1):]
+
+    return md
+
 
 
 def migrate_skills_from_sqlite_to_pg() -> int:
@@ -644,3 +954,124 @@ def migrate_skills_from_sqlite_to_pg() -> int:
         return migrated
     finally:
         conn.close()
+
+def reconcile_compare_counts(md: str) -> str:
+    """Reconcile table summary counts in business-compare reports to prevent LLM hallucinations."""
+    if not md:
+        return md
+
+    # 1. Table 1 (TỔNG HỢP ĐIỂM ĐÚNG)
+    t1_match = re.search(r"##\s*1\.\s*TỔNG\s*HỢP\s*ĐIỂM\s*ĐÚNG(.*?)(?=##\s*2|\Z)", md, re.DOTALL | re.I)
+    if t1_match:
+        t1_text = t1_match.group(1)
+        t1_rows = [
+            line for line in t1_text.splitlines() 
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"STT", line, re.I)
+        ]
+        actual_dung_count = len(t1_rows)
+        if actual_dung_count > 0:
+            new_t1_text = re.sub(
+                r"(\*?\*?Tổng\s+số\s+điểm\s+đúng\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+                lambda m: f"{m.group(1)}{actual_dung_count}{m.group(2) or ''}",
+                t1_text,
+                flags=re.I
+            )
+            md = md[:t1_match.start(1)] + new_t1_text + md[t1_match.end(1):]
+
+    # 2. Table 2 (ĐIỂM CẦN XỬ LÝ)
+    t2_match = re.search(r"##\s*2\.\s*ĐIỂM\s*CẦN\s*XỬ\s*LÝ(.*)", md, re.DOTALL | re.I)
+    if t2_match:
+        t2_text = t2_match.group(1)
+        t2_rows = [
+            line for line in t2_text.splitlines()
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"STT", line, re.I)
+        ]
+        
+        sai_count = 0
+        missing_count = 0
+        unknown_count = 0
+        for r in t2_rows:
+            parts = [p.strip() for p in r.split("|")]
+            status_col = parts[5].upper() if len(parts) >= 6 else r.upper()
+            if "KHÔNG TÌM THẤY" in status_col:
+                missing_count += 1
+            elif "KHÔNG HIỂU" in status_col:
+                unknown_count += 1
+            elif "SAI" in status_col:
+                sai_count += 1
+
+        new_t2_text = re.sub(
+            r"(\*?\*?Tổng\s+số\s+điểm\s+SAI\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+TÌM\s+THẤY\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+HIỂU\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+            f"**Tổng số điểm SAI: {sai_count} | KHÔNG TÌM THẤY: {missing_count} | KHÔNG HIỂU: {unknown_count}**",
+            t2_text,
+            flags=re.I
+        )
+        md = md[:t2_match.start(1)] + new_t2_text + md[t2_match.end(1):]
+
+    return md
+
+
+
+def reconcile_compare_counts(md: str) -> str:
+    """Reconcile table summary counts in business-compare reports to prevent LLM hallucinations."""
+    if not md:
+        return md
+
+    # 1. Table 1 (TỔNG HỢP ĐIỂM ĐÚNG)
+    t1_match = re.search(r"##\s*1\.\s*TỔNG\s*HỢP\s*ĐIỂM\s*ĐÚNG(.*?)(?=##\s*2|\Z)", md, re.DOTALL | re.I)
+    if t1_match:
+        t1_text = t1_match.group(1)
+        t1_rows = [
+            line for line in t1_text.splitlines() 
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"\bSTT\b", line, re.I)
+        ]
+        actual_dung_count = len(t1_rows)
+        if actual_dung_count > 0:
+            new_t1_text = re.sub(
+                r"(\*?\*?Tổng\s+số\s+điểm\s+đúng\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+                lambda m: f"{m.group(1)}{actual_dung_count}{m.group(2) or ''}",
+                t1_text,
+                flags=re.I
+            )
+            md = md[:t1_match.start(1)] + new_t1_text + md[t1_match.end(1):]
+
+    # 2. Table 2 (ĐIỂM CẦN XỬ LÝ)
+    t2_match = re.search(r"##\s*2\.\s*ĐIỂM\s*CẦN\s*XỬ\s*LÝ(.*)", md, re.DOTALL | re.I)
+    if t2_match:
+        t2_text = t2_match.group(1)
+        t2_rows = [
+            line for line in t2_text.splitlines()
+            if line.strip().startswith("|") 
+            and not re.match(r"^\|\s*[-:]+\s*\|", line.strip()) 
+            and not re.search(r"\bSTT\b", line, re.I)
+        ]
+        
+        sai_count = 0
+        missing_count = 0
+        unknown_count = 0
+        for r in t2_rows:
+            parts = [p.strip() for p in r.split("|")]
+            status_col = parts[5].upper() if len(parts) >= 6 else r.upper()
+            if "KHÔNG TÌM THẤY" in status_col:
+                missing_count += 1
+            elif "KHÔNG HIỂU" in status_col:
+                unknown_count += 1
+            elif "SAI" in status_col:
+                sai_count += 1
+
+        new_t2_text = re.sub(
+            r"(\*?\*?Tổng\s+số\s+điểm\s+SAI\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+TÌM\s+THẤY\s*:\s*\*?\*?\s*)\d+.*?(KHÔNG\s+HIỂU\s*:\s*\*?\*?\s*)\d+(\*?\*?)",
+            f"**Tổng số điểm SAI: {sai_count} | KHÔNG TÌM THẤY: {missing_count} | KHÔNG HIỂU: {unknown_count}**",
+            t2_text,
+            flags=re.I
+        )
+        md = md[:t2_match.start(1)] + new_t2_text + md[t2_match.end(1):]
+
+    return md
+
