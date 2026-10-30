@@ -610,7 +610,29 @@ async def upload_document(
 
             in_storage = await asyncio.to_thread(_check_sqlite_exists, existing.document_id)
 
-        if in_storage:
+        # Check if existing document text is empty or corrupt (e.g. multi-page scanned PDF with < 500 chars)
+        is_corrupt_scan = False
+        if in_storage and ext.lower() == ".pdf":
+            def _check_doc_quality(d_id: str) -> bool:
+                try:
+                    docs = store.get_full_documents([d_id])
+                    if docs:
+                        txt = docs[0].get("full_text") or ""
+                        pages = docs[0].get("page_count") or 1
+                        if pages > 1 and len(txt.strip()) < 500:
+                            return True
+                except Exception:
+                    pass
+                return False
+
+            is_corrupt_scan = await asyncio.to_thread(_check_doc_quality, existing.document_id)
+            if is_corrupt_scan:
+                logger.warning(
+                    "Existing document %s in storage is incomplete/corrupted (page_count > 1 but chars < 500). Bypassing deduplication cache to re-parse with OCR.",
+                    existing.document_id,
+                )
+
+        if in_storage and not is_corrupt_scan:
             logger.info(
                 "Duplicate upload '%s' -> reuse document %s (verified in storage)",
                 file.filename,

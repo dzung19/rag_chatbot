@@ -2,14 +2,16 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies for python-magic and curl (used by container healthchecks)
+# Install system dependencies for python-magic, curl, and OpenCV/RapidOCR headless runtime
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libmagic1 curl && \
+    apt-get install -y --no-install-recommends libmagic1 curl libglib2.0-0 libgl1 libgomp1 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy and install Python dependencies
 COPY services/ingestion/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir --default-timeout=120 --retries 10 -r requirements.txt
+RUN pip install --no-cache-dir --default-timeout=120 --retries 10 -r requirements.txt && \
+    pip uninstall -y opencv-python && \
+    pip install --no-cache-dir --force-reinstall --no-deps "opencv-python-headless>=4.8.0,<5.0.0"
 
 # Copy shared libraries
 COPY shared/ /app/shared/

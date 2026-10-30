@@ -478,17 +478,12 @@ def _cluster_words_into_visual_lines(
     for w in sorted_words:
         placed = False
         # Check recent lines for vertical alignment
-        for line in reversed(lines[-6:]):
-            # Same line if vertical centers are within y_tolerance
-            # or if vertical overlap is > 55% of the smaller height
+        for line in reversed(lines[-8:]):
             cy_diff = abs(w.cy - line.cy)
             overlap = min(w.y1, line.y1) - max(w.y0, line.y0)
-            min_h = min(w.height, max(1.0, line.y1 - line.y0))
-            if cy_diff <= y_tolerance or (overlap > 0 and (overlap / min_h) >= 0.55):
+            avg_h = max(1.0, (w.height + (line.y1 - line.y0)) / 2.0)
+            if cy_diff <= y_tolerance and (overlap > 0 and (overlap / avg_h) >= 0.45):
                 line.words.append(w)
-                # Update line vertical bounds smoothly
-                line.y0 = min(line.y0, w.y0)
-                line.y1 = max(line.y1, w.y1)
                 placed = True
                 break
         if not placed:
@@ -986,6 +981,12 @@ def _append_shipping_structured_summary(page_text: str, page_num: int) -> str:
                 re.I,
             )
             seal_no = s_m.group(1).strip() if s_m else "N/A"
+            if seal_no == "N/A":
+                s_m2 = re.search(r"\b" + re.escape(c_no) + r"[\s|/]+([A-Z0-9\-]{6,15})\b", block)
+                if s_m2:
+                    cand = s_m2.group(1).strip()
+                    if not re.match(r"^(?:40HC|40HQ|20GP|40GP|40FT|FCL|LCL|CY|CFS|SEAL|CONT)\b", cand, re.I):
+                        seal_no = cand
 
             # 1.4 Type (include up to 120 chars before container number for Checklist 'STUFFING PLAN 40HC:... | FCL CONTAINER NO. ...')
             type_search_block = page_text[max(0, start - 120) : end]
@@ -1443,7 +1444,7 @@ def _extract_scanned_page_text(
                 ocr_words.append(
                     WordBox(min(xs), min(ys), max(xs), max(ys), str(text_val).strip())
                 )
-            lines = _cluster_words_into_visual_lines(ocr_words, y_tolerance=8.0)
+            lines = _cluster_words_into_visual_lines(ocr_words, y_tolerance=6.0)
             text_out = "\n".join(vl.render(col_gap_pt=25.0) for vl in lines if vl.words)
             if len(text_out.strip()) >= 30:
                 logger.info("Extracted scanned page %d of %s via RapidOCR", page_num, file_path)
@@ -1493,15 +1494,20 @@ def _ollama_vision_transcribe_page(
     page_num: int,
 ) -> str:
     """Transcribe one rendered PDF page using Ollama Vision."""
-    host = os.environ.get(
-        "OLLAMA_HOST",
-        "http://ollama:11434",
-    ).rstrip("/")
+    try:
+        from shared.config import get_settings
+        settings = get_settings()
+        default_model = settings.ollama_vision_model or settings.ollama_model or "gemma4:latest"
+        default_host = settings.ollama_host or "http://ollama:11434"
+    except Exception:
+        default_model = "gemma4:latest"
+        default_host = "http://ollama:11434"
 
+    host = (os.environ.get("OLLAMA_HOST") or default_host).rstrip("/")
     model = (
         os.environ.get("OLLAMA_VISION_MODEL")
         or os.environ.get("OLLAMA_MODEL")
-        or "gemma4:latest"
+        or default_model
     )
 
     encoded_image = base64.b64encode(
@@ -1534,7 +1540,6 @@ def _ollama_vision_transcribe_page(
                 json={
                     "model": model,
                     "stream": False,
-                    "think": False,
                     "messages": [
                         {
                             "role": "user",
