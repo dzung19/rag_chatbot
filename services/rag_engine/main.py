@@ -457,9 +457,28 @@ async def query_stream(request: ChatRequest):
                 main_skill=main_skill,
                 modifier_skills=modifier_skills,
             )
+            
+            """ 
+            Liability）andArticle17                                                                                                                   +
+            M345JE,ENGLANDTEL+44(0)7795408300                                                                                                         +
+            EMAIL:AGNIESZKA.CALKA-BONCZAK@BROTHER.CO.UK | documentoftiteanddelivery shallbemadetothenamedconsigneeonproductionof suchreasonableproofof+
+            EORI:DE760551960552887 | identityasmayberequiredbyteCarrrInwitesswhereoftheundersigedunbealfftheCarierhas                                 +
+            signed thenumberofBilsstatedhereunder,allof thistenoranddate.Where issuedasaBillofLadingdelivery                                          +
+            VAT+864450220 | maybemadeagainstonlyone originalBilinwhichcase,theothers shallstandvoid.（Termscontinuedon                                +
+            backhereof andenlargedcnpynf hack clausesis availablefrom the Carrier uponrequestoronCarrier's                                            +
+            NotifyParty | websiteathttps:/www.yusen-logistics.com/services/end-to-end-transportation/ocean-freight-forwarding/ocean-                  +
+            freight-forwarding-terms-and-conditions).                                                                                                 +
+            BROTHER INTERNATIONAL EUROPE LTD.                                                                                                         +
+            BROTHER HOUSE，1TAME STREET，GUIDE BRIDGE，                                                                                               +
+            AUDENSHAW,MANCHESTER, | Export/lmportReference(fortheMerchant'sand/orCarrier'sreference only)                                             +
+            M34 5JE,ENGLAND TEL+44(0)7795408300                                                                                                       +
+            EMAIL:AGNIESZKA.CALKA-BONCZAK@BROTHER.CO.UK                                                                                               +
+            ForwardingAgentReference(forfreightforwarder'sreferenceonly)                                                                              +
+            VAT+864450220                                                                                                                             +
+            --More-- 
+            """
 
             # 3. Stream LLM response through the arrow cleaner
-                        # 3. Stream LLM response through the arrow cleaner
             llm = _get_llm_client()
             output_chars = 0
             output_events = 0

@@ -69,7 +69,14 @@ BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, H
   - 4.4. Mỗi description chuẩn chỉ được xuất hiện **đúng 1 lần** trên toàn bộ BL (0 lần → **SAI: thiếu**, >=2 lần trên các container → **SAI: trùng lặp**, ngoài danh sách chuẩn → **SAI: thừa**).
 - **Hạng mục 17 (`ETD`)**: Đối chiếu `ETD` / `ETD HPH ON` trên BL Check List với `SHIPPED ON BOARD DATE` / `ETD` trên BL. Khác định dạng ngày (`YYYY.MM.DD` vs `DD-Mon-YYYY`) nhưng cùng ngày/tháng/năm là **ĐÚNG** (Bảng 1); khác ngày/tháng/năm kết luận **SAI** (Bảng 2).
 - **Hạng mục 18 (`ISSUE DATE = ETD`)**: Đối chiếu ngày `ETD` thực tế trên BL Check List (ghi ở cột `Dữ liệu BL Check List`) với nơi & ngày phát hành tại ô `PLACE AND DATE OF ISSUE` ở cuối trang BL (ghi ở cột `Dữ liệu BL` dạng `<Nơi phát hành>, <Ngày phát hành>`). Nếu cùng ngày/tháng/năm thì kết luận **ĐÚNG** (đưa vào Bảng 1); nếu khác ngày/tháng/năm kết luận **SAI** (đưa vào Bảng 2). Không lấy ngày in phiếu cạnh `PAGE` ở đầu trang Check List.
-- **Hạng mục 20 (`Delivery term`)**: Trên Check List đọc dòng dưới `STUFFING PLAN` (`CY / ... CY` là `CY-CY`; `CY / ... SDD` là `CY-DOOR` vì `SDD` = `DOOR`). Đối chiếu với Delivery term trên BL (`CY-CY`, `CY-DOOR`, `CFS-CFS`, `CFS-DOOR`). Khớp nhau kết luận **ĐÚNG** (Bảng 1); khác nhau kết luận **SAI** (Bảng 2).
+- Hạng mục 20 (Delivery term): Trên Check List, dòng ngay dưới STUFFING PLAN có dạng
+  "<cảng> | CY / <điểm giao> | <loại giao> | SEAL NO. | <số seal>".
+  Ô <loại giao> nằm giữa "CY / <điểm giao>" và "SEAL NO.":
+  + Là "SDD" hoặc "DOOR" → CY-DOOR.
+  + Là "CY" → CY-CY.
+  "SDD" là loại giao hàng, KHÔNG phải số seal.
+  Đối chiếu với Delivery term trên BL (CY-CY, CY-DOOR, CFS-CFS, CFS-DOOR).
+  Khớp → ĐÚNG (Bảng 1); khác → SAI (Bảng 2).
 - **Hạng mục 22 (`B/L REQUIRED`)**: Trên BL, có `SHIPPED ON BOARD DATE + ngày` nghĩa là `ON BOARD`; có `RECEIVED DATE + ngày` nghĩa là `RECEIVED` (có đồng thời cả hai là **SAI**). Đối chiếu với `B/L REQUIRED` trên Check List; nếu khớp thì kết luận **ĐÚNG** (Bảng 1); không khớp hoặc mâu thuẫn kết luận **SAI** (Bảng 2).
 - **Hạng mục 23 (`HS code`)**: BL không được hiển thị HS code (cả hai không có hoặc chỉ Check List không yêu cầu hiển thị trên BL → kiểm tra theo thực tế tài liệu; nếu BL hiển thị HS code là **SAI**).
 
