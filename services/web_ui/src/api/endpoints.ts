@@ -52,3 +52,15 @@ export async function renameConversationApi(conversationId: string, title: strin
 export async function deleteConversationApi(conversationId: string): Promise<{ message?: string }> {
   return deleteRequest(`/conversations/${conversationId}`);
 }
+
+export async function exportCompareExcelApi(content: string, title?: string): Promise<Blob> {
+  const { request } = await import("./client");
+  const res = await request("/chat/export-excel", {
+    method: "POST",
+    body: JSON.stringify({
+      content,
+      title: title || "Ket_qua_doi_chieu",
+    }),
+  });
+  return await res.blob();
+}

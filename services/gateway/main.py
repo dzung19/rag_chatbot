@@ -483,6 +483,44 @@ async def chat_sync(
         raise HTTPException(status_code=500, detail="An error occurred.")
 
 
+class ExportExcelRequest(BaseModel):
+    content: str
+    title: str = "Báo cáo đối chiếu"
+
+
+@app.post("/api/v1/chat/export-excel")
+async def export_compare_excel(
+    request: ExportExcelRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Export comparison result markdown table to a formatted 2-sheet Excel file."""
+    if not request.content or not request.content.strip():
+        raise HTTPException(status_code=400, detail="Nội dung đối chiếu không được để trống.")
+
+    try:
+        from shared.excel_exporter import generate_compare_excel_bytes
+        import io
+        from urllib.parse import quote
+
+        excel_bytes = generate_compare_excel_bytes(request.content, title=request.title)
+
+        safe_title = re.sub(r"[^\w\-_]", "_", request.title.strip()) or "Ket_qua_doi_chieu"
+        filename = f"{safe_title}.xlsx"
+        encoded_filename = quote(filename)
+
+        return StreamingResponse(
+            io.BytesIO(excel_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+                "Access-Control-Expose-Headers": "Content-Disposition",
+            },
+        )
+    except Exception as e:
+        logger.error("Failed to generate Excel comparison file: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail="Lỗi khi tạo file Excel đối chiếu.")
+
+
 # ---------------------------------------------------------------------------
 # Conversation Endpoints
 # ---------------------------------------------------------------------------

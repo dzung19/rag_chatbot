@@ -27,3 +27,29 @@
   color: var(--accent-blue);
   background-color: var(--surface-hover);
 }
+
+.excelBtn {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--badge-green-text, #10b981);
+  background-color: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  transition: all var(--transition-fast);
+  cursor: pointer;
+}
+
+.excelBtn:hover:not(:disabled) {
+  background-color: rgba(16, 185, 129, 0.2);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #34d399;
+}
+
+.excelBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
