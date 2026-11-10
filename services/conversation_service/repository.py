@@ -581,3 +581,30 @@ def admin_list_audit(
             .offset(offset)
         ).all()
     )
+
+
+def delete_last_turn(
+    session: Session,
+    *,
+    conversation_id: str,
+    owner_id: str,
+) -> bool:
+    conversation = session.get(Conversation, conversation_id)
+    if (
+        conversation is None
+        or conversation.owner_id != owner_id
+        or conversation.deleted_at is not None
+    ):
+        return False
+
+    last_turn = session.scalars(
+        select(ChatTurn)
+        .where(ChatTurn.conversation_id == conversation_id)
+        .order_by(ChatTurn.created_at.desc())
+    ).first()
+
+    if last_turn:
+        session.delete(last_turn)
+        session.flush()
+        return True
+    return False

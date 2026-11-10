@@ -234,6 +234,17 @@ async def chat_stream(
     assistant_msg_id = None
 
     if request.conversation_id:
+        if request.is_regenerate:
+            try:
+                await client.delete(
+                    f"{settings.conversation_service_url}/internal/conversations/{request.conversation_id}/last-turn",
+                    params={"owner_id": current_user.user_id},
+                    headers={"x-internal-service-key": settings.internal_service_key or ""},
+                    timeout=5.0,
+                )
+            except Exception as e:
+                logger.warning("Failed to delete last turn for regeneration: %s", str(e))
+
         try:
             start_resp = await client.post(
                 f"{settings.conversation_service_url}/internal/turns/start",
@@ -407,6 +418,17 @@ async def chat_sync(
     assistant_msg_id = None
 
     if request.conversation_id:
+        if request.is_regenerate:
+            try:
+                await client.delete(
+                    f"{settings.conversation_service_url}/internal/conversations/{request.conversation_id}/last-turn",
+                    params={"owner_id": current_user.user_id},
+                    headers={"x-internal-service-key": settings.internal_service_key or ""},
+                    timeout=5.0,
+                )
+            except Exception as e:
+                logger.warning("Failed to delete last turn for regeneration: %s", str(e))
+
         try:
             start_resp = await client.post(
                 f"{settings.conversation_service_url}/internal/turns/start",

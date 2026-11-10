@@ -26,6 +26,7 @@ export async function* streamChat(
       skill_id: params.skill_id,
       modifier_skill_ids: params.modifier_skill_ids,
       selected_document_ids: params.selected_document_ids ?? [],
+      is_regenerate: params.is_regenerate ?? false,
     }),
     signal,
   });

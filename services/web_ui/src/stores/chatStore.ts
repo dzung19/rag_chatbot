@@ -28,7 +28,11 @@ interface ChatState {
   selectConversation: (id: string) => Promise<void>;
   renameConversation: (id: string, newTitle: string) => Promise<void>;
   deleteConversation: (id: string) => Promise<void>;
-  sendMessage: (query: string, attachedFiles?: File[]) => Promise<void>;
+  sendMessage: (
+    query: string,
+    attachedFiles?: File[],
+    options?: { isRegenerate?: boolean; targetMessageId?: string }
+  ) => Promise<void>;
   stopStreaming: () => void;
   regenerate: (messageId?: string) => Promise<void>;
   setFeedback: (conversationId: string, messageId: string, feedback: "up" | "down") => void;
@@ -269,10 +273,26 @@ export const useChatStore = create<ChatState>()(
               return m;
             });
 
+            // Sanitize: loại bỏ tin nhắn user bị lặp lại liên tiếp (nếu từng có từ các lượt regenerate cũ)
+            const sanitizedMessages: ChatMessage[] = [];
+            for (let i = 0; i < messages.length; i++) {
+              const current = messages[i];
+              const last = sanitizedMessages[sanitizedMessages.length - 1];
+              if (
+                current.role === "user" &&
+                last &&
+                last.role === "user" &&
+                last.content.trim() === current.content.trim()
+              ) {
+                continue;
+              }
+              sanitizedMessages.push(current);
+            }
+
             const updatedConv: Conversation = {
               id: detail.id,
               title: detail.title || prev?.title || "New chat",
-              messages,
+              messages: sanitizedMessages,
               updatedAt: detail.updated_at
                 ? new Date(detail.updated_at).getTime()
                 : (prev?.updatedAt ?? Date.now()),
@@ -350,10 +370,16 @@ export const useChatStore = create<ChatState>()(
         }
       },
 
-      sendMessage: async (query: string, attachedFiles?: File[]) => {
+      sendMessage: async (
+        query: string,
+        attachedFiles?: File[],
+        options?: { isRegenerate?: boolean; targetMessageId?: string }
+      ) => {
         const trimmedQuery = query.trim();
         const files = attachedFiles ?? [];
         const hasFiles = files.length > 0;
+        const isRegenerate = options?.isRegenerate ?? false;
+        const targetMessageId = options?.targetMessageId;
 
         if (!trimmedQuery && !hasFiles) return;
         if (get().isStreaming) return;
@@ -397,24 +423,15 @@ export const useChatStore = create<ChatState>()(
         };
 
         try {
-          // 1. Ghi tin nhắn người dùng TRƯỚC khi upload,
+          // 1. Ghi tin nhắn người dùng TRƯỚC khi upload (nếu không phải regenerate),
           //    để cuộc trò chuyện không còn trống và không bị dọn mất
           if (trimmedQuery) {
             set((state) => {
               const conv = state.conversations[conversationId];
               if (!conv) return {};
 
-              isFirstMessage = !conv.messages.some((m) => m.role === "user");
+              isFirstMessage = !isRegenerate && !conv.messages.some((m) => m.role === "user");
               nextTitle = isFirstMessage ? titleFromQuery(trimmedQuery) : conv.title;
-
-              const userMsg: ChatMessage = {
-                id: userMsgId,
-                role: "user",
-                content: trimmedQuery,
-                sources: [],
-                status: "done",
-                createdAt: Date.now(),
-              };
 
               const assistantMsg: ChatMessage = {
                 id: assistantMsgId,
@@ -425,6 +442,43 @@ export const useChatStore = create<ChatState>()(
                 createdAt: Date.now(),
               };
 
+              let newMessages: ChatMessage[];
+              if (isRegenerate) {
+                // Khi regenerate: KHÔNG thêm tin nhắn user mới!
+                // Thay thế tin nhắn assistant cũ (tìm theo targetMessageId) bằng assistantMsg mới
+                const copy = [...conv.messages];
+                const targetIdx = targetMessageId
+                  ? copy.findIndex((m) => m.id === targetMessageId)
+                  : -1;
+                if (targetIdx !== -1) {
+                  copy[targetIdx] = assistantMsg;
+                } else {
+                  let lastAssistantIdx = -1;
+                  for (let i = copy.length - 1; i >= 0; i--) {
+                    if (copy[i].role === "assistant") {
+                      lastAssistantIdx = i;
+                      break;
+                    }
+                  }
+                  if (lastAssistantIdx !== -1) {
+                    copy[lastAssistantIdx] = assistantMsg;
+                  } else {
+                    copy.push(assistantMsg);
+                  }
+                }
+                newMessages = copy;
+              } else {
+                const userMsg: ChatMessage = {
+                  id: userMsgId,
+                  role: "user",
+                  content: trimmedQuery,
+                  sources: [],
+                  status: "done",
+                  createdAt: Date.now(),
+                };
+                newMessages = [...conv.messages, userMsg, assistantMsg];
+              }
+
               return {
                 activeId: conversationId,
                 order: [conversationId, ...state.order.filter((x) => x !== conversationId)],
@@ -433,7 +487,7 @@ export const useChatStore = create<ChatState>()(
                   [conversationId]: {
                     ...conv,
                     title: nextTitle,
-                    messages: [...conv.messages, userMsg, assistantMsg],
+                    messages: newMessages,
                     updatedAt: Date.now(),
                   },
                 },
@@ -522,6 +576,7 @@ export const useChatStore = create<ChatState>()(
               skill_id: activeMainSkillId,
               modifier_skill_ids: activeModifierSkillIds,
               selected_document_ids: selectedDocIds,
+              is_regenerate: isRegenerate,
             },
             controller.signal
           );
@@ -637,6 +692,7 @@ export const useChatStore = create<ChatState>()(
       },
 
       regenerate: async (messageId?: string) => {
+        if (get().isStreaming) return;
         const activeId = get().activeId;
         if (!activeId) return;
         const conv = get().conversations[activeId];
@@ -656,6 +712,7 @@ export const useChatStore = create<ChatState>()(
         }
 
         if (targetIndex === -1) return;
+        const targetMsg = conv.messages[targetIndex];
 
         // Find the preceding user message
         let userPrompt = "";
@@ -668,24 +725,12 @@ export const useChatStore = create<ChatState>()(
 
         if (!userPrompt) return;
 
-        // Remove the target assistant message
-        set((state) => {
-          const currentConv = state.conversations[activeId];
-          const newMessages = [...currentConv.messages];
-          newMessages.splice(targetIndex, 1);
-          return {
-            conversations: {
-              ...state.conversations,
-              [activeId]: {
-                ...currentConv,
-                messages: newMessages,
-              },
-            },
-          };
+        // Gọi sendMessage với isRegenerate = true và targetMessageId
+        // Tránh tạo thêm userMsg mới trên UI và thay thế trực tiếp câu trả lời của trợ lý
+        await get().sendMessage(userPrompt, undefined, {
+          isRegenerate: true,
+          targetMessageId: targetMsg.id,
         });
-
-        // Resend query
-        await get().sendMessage(userPrompt);
       },
 
       setFeedback: (conversationId: string, messageId: string, feedback: "up" | "down") => {

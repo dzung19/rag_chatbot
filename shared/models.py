@@ -128,6 +128,10 @@ class ChatRequest(BaseModel):
         default_factory=list,
         description="List of document IDs uploaded or scoped for this query"
     )
+    is_regenerate: bool = Field(
+        default=False,
+        description="Whether this query is regenerating a previous response"
+    )
 
 
 class SourceDocument(BaseModel):

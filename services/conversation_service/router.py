@@ -19,6 +19,7 @@ from .database import (
 )
 from .repository import (
     complete_turn,
+    delete_last_turn,
     fail_turn,
     get_conversation,
     list_conversations,
@@ -396,6 +397,25 @@ def mark_turn_failed(
     except Exception:
         session.rollback()
         raise
+
+
+@internal_router.delete(
+    "/conversations/{conversation_id}/last-turn",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def remove_last_turn(
+    conversation_id: str,
+    owner_id: str = Query(...),
+    session: DatabaseSession = None,
+):
+    try:
+        delete_last_turn(session, conversation_id=conversation_id, owner_id=owner_id)
+        session.commit()
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    except Exception:
+        session.rollback()
+        raise
+
 
 def verify_admin_actor(
     x_admin_actor_id: Annotated[str, Header()],

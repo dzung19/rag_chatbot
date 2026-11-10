@@ -64,10 +64,11 @@ export interface ChatQueryParams {
   temperature?: number;
   stream?: boolean;
   conversation_id?: string;
-  request_id?:string;
+  request_id?: string;
   skill_id?: string;
   modifier_skill_ids?: string[];
   selected_document_ids?: string[];
+  is_regenerate?: boolean;
 }
 
 export interface ApiConversationSummary {
