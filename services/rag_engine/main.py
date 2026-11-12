@@ -477,7 +477,19 @@ async def query_stream(request: ChatRequest):
             VAT+864450220                                                                                                                             +
             --More-- 
             """
+            
+            final_prompt = "\n".join(
+                str(m.get("content") or "") for m in messages
+            ).upper()
 
+            compact = re.sub(r"\s+", "", final_prompt)
+
+            logger.info(
+                "Notify evidence: notify_label=%d audenshaw=%d calka=%d",
+                compact.count("NOTIFYPARTY"),
+                final_prompt.count("AUDENSHAW"),
+                final_prompt.count("CALKA"),
+            )
             # 3. Stream LLM response through the arrow cleaner
             llm = _get_llm_client()
             output_chars = 0

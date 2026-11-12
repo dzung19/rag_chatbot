@@ -203,6 +203,27 @@ def build_rag_messages(
     else:
         context_text = build_context_text(context_chunks, max_chars=max_context_chars)
     
+    if main_skill and main_skill.id == "business-compare":
+        import re
+
+        logger.info(
+            "[DEBUG COMPARE CONTEXT] input_chars=%s final_context_chars=%d",
+            [len(chunk.get("text") or "") for chunk in context_chunks],
+            len(context_text),
+        )
+
+        for index, match in enumerate(
+            re.finditer(r"CONSIGNEE", context_text, flags=re.IGNORECASE),
+            start=1,
+        ):
+            start = max(0, match.start() - 100)
+            end = min(len(context_text), match.end() + 700)
+
+            logger.info(
+                "[DEBUG CONSIGNEE CONTEXT %d] %r",
+                index,
+                context_text[start:end],
+            )
     # Inject skills into system prompt
     final_system_prompt = system_prompt
     if main_skill:

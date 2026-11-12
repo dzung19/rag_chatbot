@@ -14,6 +14,7 @@ from enum import Enum
 import logging
 import re
 from typing import Any, Optional
+import unicodedata
 
 logger = logging.getLogger(__name__)
 
@@ -415,22 +416,40 @@ def extract_document_containers(full_text: str, is_checklist: bool = False) -> l
                     seal_no = cand
 
         t_m = re.search(
-            r"((?:20|40|45)(?:\'|\s*ft)?\s*(?:gp|dc|hc|hq|rf|ot|fr|tk|std|high\s+cube)|40HC:40FT[^\n|]+)",
+            r"((?:20|40|45)[A-Z0-9]{0,3}:[0-9A-Z\s]+?(?=\s+FCL\b|\s+SEAL\b|\s+CY\b|\s+SDD\b|\s{2,}|\s+\d+\s*$|\n|$)|\b(?:20|40|45)(?:\'|\s*ft)?\s*(?:gp|dc|hc|hq|rf|ot|fr|tk|std|dry(?:\s*container)?|general\s*purpose|high\s*cube(?: container)?))",
             block,
-            re.I,
+            re.I | re.M,
         )
+        if not t_m:
+            t_m = re.search(
+                r"\bNUMBER\s+OF\s+CONTAINER[^\n]*\n\s*([0-9A-Z':\s\-]+?)(?:\s+\d+\s*$|\n)",
+                clean_text,
+                re.I,
+            )
+        if not t_m:
+            t_m = re.search(
+                r"\b(?:PART\s+OF\s+)?(?:\d+\s*x\s*)?((?:20|40|45)(?:\'|\s*ft)?\s*(?:high\s*cube(?: container)?|hc|hq|gp|dc|std|dry(?:\s*container)?)[^\n|]*)",
+                clean_text,
+                re.I,
+            )
+
         if t_m:
-            raw_t = t_m.group(1).upper().replace(" ", "").replace("-", "").replace("'", "")
+            raw_t_full = t_m.group(1).strip()
+            raw_t = raw_t_full.upper().replace(" ", "").replace("-", "").replace("'", "")
             if any(k in raw_t for k in ["40HC", "40HQ", "HIGHCUBE", "40FT9FT6IN"]):
                 cont_type = "40HC"
-            elif any(k in raw_t for k in ["20GP", "20DC", "20STD"]):
+            elif any(k in raw_t for k in ["20GP", "20DC", "20STD", "20DRY", "20FT8FT6IN"]):
                 cont_type = "20GP"
-            elif any(k in raw_t for k in ["40GP", "40DC", "40STD"]):
+            elif any(k in raw_t for k in ["40GP", "40DC", "40STD", "40DRY", "40FT8FT6IN"]):
                 cont_type = "40GP"
+            elif any(k in raw_t for k in ["45HC", "45HQ"]):
+                cont_type = "45HC"
             else:
-                cont_type = t_m.group(1).strip()
+                cont_type = raw_t_full
+            type_raw = raw_t_full
         else:
             cont_type = "N/A"
+            type_raw = "N/A"
 
         # Extract Delivery / Movement term (supports 'BAC NINH | CY / LONG BEACH | CY', 'CY / ... SDD', 'CY - CY', etc.)
         term_m = re.search(
@@ -462,6 +481,7 @@ def extract_document_containers(full_text: str, is_checklist: bool = False) -> l
                 "pkgs_num": int(round(_parse_num_val(pkgs_raw))),
                 "pkgs_raw": pkgs_raw,
                 "type": cont_type,
+                "type_raw": type_raw,
                 "movement": movement,
                 "movement_raw": movement_raw,
                 "weight_num": round(_parse_num_val(weight_raw), 3),
@@ -629,9 +649,15 @@ def extract_goods_descriptions_comparison(checklist_text: str, bl_text: str) -> 
 def clean_shipping_context_for_llm(checklist_text: str, bl_text: str) -> tuple[str, str]:
     """Strip misleading print-date headers, incomplete per-page container tables, and legal fine-print noise."""
     cl = checklist_text
-    # 1. Remove misleading Check List Print Date and top-header '1. Shipper: BIL'
+    # 1. Remove misleading Check List Print Date, top-header '1. Shipper: BIL', and invoice amount noise in '1. Shipper'
     cl = re.sub(r"^- \*\*1\. Shipper\*\*:\s*BIL\s*\n", "", cl, flags=re.M | re.I)
-    cl = re.sub(r"^- \*\*1\. Shipper\*\*:\s*BIVN\b", "- **1. Shipper**: BIVN (BROTHER INDUSTRIES (VIETNAM) LTD.)", cl, flags=re.M | re.I)
+    if re.search(r"\bSHIPPER\s*:\s*BIVN\b", cl, re.I):
+        cl = re.sub(
+            r"^- \*\*1\. Shipper\*\*:[^\n]*$",
+            "- **1. Shipper**: BIVN (BROTHER INDUSTRIES (VIETNAM) LTD.)",
+            cl,
+            flags=re.M | re.I,
+        )
     cl = re.sub(r"^- \*\*Check List Print Date[^\n]*\n", "", cl, flags=re.M | re.I)
     cl = re.sub(r"^\s*- \*\*Ngày in phiếu Check List[^\n]*\n", "", cl, flags=re.M | re.I)
     # Strip print date from 'SHIPPED PER | DATE | PAGE \n VALIANT | 2026.09.15 | 1'
@@ -656,6 +682,23 @@ def clean_shipping_context_for_llm(checklist_text: str, bl_text: str) -> tuple[s
     )
     cl_conts = extract_document_containers(checklist_text, is_checklist=True)
     if cl_conts:
+        # cl_conts phai duoc lay va xu ly xong truoc doan nay.
+        term_summary = ", ".join(
+            f"{container['container_no']}={container['movement']}"
+            for container in cl_conts
+            if container.get("movement")
+            and container["movement"] != "N/A"
+        ) or "Không xác định"
+
+        type_summary = ", ".join(
+            sorted({
+                container["type"]
+                for container in cl_conts
+                if container.get("type")
+                and container["type"] != "N/A"
+            })
+        ) or "Không xác định"
+        
         cl_tot_p = sum(c["pkgs_num"] for c in cl_conts)
         cl_tot_w = sum(c["weight_num"] for c in cl_conts)
         cl_tot_c = sum(c["cbm_num"] for c in cl_conts)
@@ -665,7 +708,8 @@ def clean_shipping_context_for_llm(checklist_text: str, bl_text: str) -> tuple[s
             cl_c_str = ", ".join(c["cbm_raw"] for c in cl_conts)
             cl += (
                 f"\n\n### [BẢNG CONTAINER VÀ TỔNG HỢP TRÊN B/L CHECK LIST (ĐÃ GHÉP ĐỦ TRANG)]\n"
-                f"- Danh sách {len(cl_conts)} Container: {', '.join(c['container_no'] for c in cl_conts)} (Loại: 40HC, Term: CY-CY)\n"
+                f"- Danh sách {len(cl_conts)} Container: {', '.join(c['container_no'] for c in cl_conts)} "
+                f"(Loại: {type_summary}, Term: {term_summary})\n"
                 f"- P'KGS từng container: {cl_pkgs_str} PKGS (Tổng P'KGS: {cl_tot_p} PKGS)\n"
                 f"- WEIGHT từng container: {cl_w_str} (Tổng Gross Weight: {cl_tot_w:,.1f} KGS)\n"
                 f"- MEASUREMENT từng container: {cl_c_str} (Tổng Measurement: {cl_tot_c:.3f} CBM)\n"
@@ -750,25 +794,161 @@ def clean_shipping_context_for_llm(checklist_text: str, bl_text: str) -> tuple[s
     )
     return cl.strip(), bl.strip()
 
+def extract_consignee_comparison(
+    checklist_text: str,
+    bl_text: str,
+) -> dict[str, Any]:
+    """Compare complete Consignee blocks across electronic Form Boxes and raw/OCR layouts."""
+
+    # Leading parenthetical form captions on the Consignee header bar across carriers
+    # (e.g. '(not to order)', '(if "Order" state Notify Party)', '(Complete name and address)', etc.)
+    _HEADER_CAPTION_PREFIX_RE = re.compile(
+        r"^(?:\s*\(\s*(?![^)]*\b(?:LTD|CORP|INC|LLC|CO|GMBH|PLC|S\.A|B\.V)\b)[^)]*\)\s*[|,;:\-]*\s*)+",
+        re.IGNORECASE,
+    )
+
+    def clean_value(value: str, is_raw_multiline: bool = False) -> str:
+        value = unicodedata.normalize("NFKC", value or "")
+        if is_raw_multiline:
+            lines_out: list[str] = []
+            for raw_ln in value.splitlines():
+                left_col = raw_ln.split("|", 1)[0].strip()
+                if not left_col:
+                    continue
+                compact_ln = re.sub(r"[^A-Z0-9]", "", left_col.upper())
+                if compact_ln.startswith((
+                    "CARRIER",
+                    "SEAWAYBILL",
+                    "BILLOFLADING",
+                    "COMBINEDTRANSPORT",
+                    "RECEIVEDTHEGOODS",
+                    "THESHIPPERSHALL",
+                    "BOOKINGNO",
+                    "EXPORTREFERENCES",
+                    "FORWARDINGAGENT",
+                )):
+                    continue
+                lines_out.append(left_col)
+            value = " ".join(lines_out)
+        else:
+            value = value.replace("|", " ")
+
+        # Remove SAP CODE metadata and leading form-header parenthetical instructions
+        value = re.sub(r"(?:\(\s*\d+\s*\)\s*)?\bSAP\s*CODE\b\s*:?\s*[A-Z0-9_\-]*", " ", value, flags=re.I)
+        value = _HEADER_CAPTION_PREFIX_RE.sub("", value.strip())
+        return " ".join(value.split()).strip()
+
+    def normalize(value: str) -> str:
+        # Ignore formatting only; preserve all letters and digits.
+        return re.sub(r"[^A-Z0-9]", "", clean_value(value).upper())
+
+    # 1. Checklist: read the block below CONSIGNEE (or fallback to FORM BOXES).
+    cl_match = re.search(
+        r"^[ \t]*CONSIGNEE\b[^\n]*\n"
+        r"(.*?)"
+        r"(?=^[ \t]*(?:"
+        r"NOTIFY\s*PARTY\b"
+        r"|DELIVERY\s*TO\b"
+        r"|INVOICE\s*NO\b"
+        r"|ORDER\s*NO\b"
+        r"|STUFFING\s*PLAN\b"
+        r"|TTL\b"
+        r"|===|###"
+        r")|\Z)",
+        checklist_text or "",
+        flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    cl_value = clean_value(cl_match.group(1), is_raw_multiline=True) if cl_match else ""
+    if not cl_value:
+        cl_box_match = re.search(
+            r"^[ \t]*-[ \t]*\*\*2\.[ \t]*Consignee\*\*:[ \t]*([^\r\n]*)",
+            checklist_text or "",
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        if cl_box_match:
+            cl_value = clean_value(cl_box_match.group(1))
+
+    # 2. BL: Tier 1 — structured FORM BOXES; Tier 2 — raw/OCR layout block below Consignee.
+    bl_match = re.search(
+        r"^[ \t]*-[ \t]*\*\*2\.[ \t]*Consignee\*\*:"
+        r"[ \t]*([^\r\n]*)",
+        bl_text or "",
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    bl_value = clean_value(bl_match.group(1)) if bl_match else ""
+    if not bl_value:
+        bl_raw_match = re.search(
+            r"^[ \t]*(?:2\.?[ \t]*)?CONSIGNEE\b[^\n]*\n"
+            r"(.*?)"
+            r"(?=^[ \t]*(?:"
+            r"(?:3\.?[ \t]*)?NOTIFY[ \t]*PART(?:Y|IES)\b"
+            r"|FIRST[ \t]*NOTIFY\b"
+            r"|ALSO[ \t]*NOTIFY\b"
+            r"|DELIVERY[ \t]*TO\b"
+            r"|(?:4\.?[ \t]*)?PRE[ \t-]*CARRIAGE\b"
+            r"|(?:5\.?[ \t]*)?PLACE[ \t]*OF[ \t]*RECEIPT\b"
+            r"|(?:6\.?[ \t]*)?(?:OCEAN[ \t]*)?VESSEL\b"
+            r"|(?:7\.?[ \t]*)?PORT[ \t]*OF[ \t]*LOADING\b"
+            r"|===|###"
+            r")|\Z)",
+            bl_text or "",
+            flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+        )
+        if bl_raw_match:
+            bl_value = clean_value(bl_raw_match.group(1), is_raw_multiline=True)
+
+    if not cl_value or not bl_value:
+        status = "KHÔNG HIỂU"
+        detail = (
+            "Chưa trích được đầy đủ block CONSIGNEE để đối chiếu. "
+            "Không được suy ra tài liệu gốc thiếu thông tin."
+        )
+    elif normalize(cl_value) == normalize(bl_value):
+        status = "ĐÚNG"
+        detail = (
+            "Toàn bộ CONSIGNEE khớp sau chuẩn hóa "
+            "khoảng trắng, xuống dòng và dấu câu."
+        )
+    else:
+        status = "SAI"
+        detail = (
+            "Hai block CONSIGNEE khác nhau sau chuẩn hóa. "
+            "Cần kiểm tra các giá trị hiển thị; "
+            "không dùng PLACE OF DELIVERY để đánh giá."
+        )
+
+    result = {
+        "cl_consignee": cl_value,
+        "bl_consignee": bl_value,
+        "status": status,
+        "is_ok": status == "ĐÚNG",
+        "detail": detail,
+    }
+
+    logger.info("[DEBUG CONSIGNEE RESULT] %r", result)
+    return result
 
 def extract_shipper_comparison(checklist_text: str, bl_text: str) -> dict[str, Any] | None:
     """Dynamically extract and reconcile Shipper information between BL Check List and BL."""
     cl_shipper = ""
-    # 1. BL Check List: Look for form box or invoice-level SHIPPER
-    m_cl_box = re.search(r"\*\*1\.\s*Shipper\*\*:\s*([^\n|]+)", checklist_text, re.I)
-    if m_cl_box:
-        cl_shipper = m_cl_box.group(1).strip()
-    else:
-        # Match "SHIPPER: BIVN" or similar under invoices (skip BIL header at top)
-        for m in re.finditer(r"\bSHIPPER:\s*([^\n|]+)", checklist_text, re.I):
-            val = m.group(1).strip()
-            if not val.upper().startswith("BIL"):
-                cl_shipper = val
-                break
-        if not cl_shipper:
-            m_cl_any = re.search(r"\bSHIPPER:\s*([^\n|]+)", checklist_text, re.I)
-            if m_cl_any:
-                cl_shipper = m_cl_any.group(1).strip()
+    # 1. BL Check List: Prioritize invoice-level 'SHIPPER: BIVN' in raw text (skip 'SHIPPER: BIL' top header
+    #    and never take 'INTER COMPANY AMOUNT' / 'TOTAL AMOUNT' / 'INCOTERMS').
+    for m in re.finditer(r"\bSHIPPER\s*:\s*([^\n|]+)", checklist_text, re.I):
+        val = m.group(1).strip()
+        val = re.split(r"\b(?:INTER\s+COMPANY\s+AMOUNT|TOTAL\s+AMOUNT|INCOTERMS|REQUEST\s+NO)\b", val, maxsplit=1, flags=re.I)[0].strip()
+        if val and not re.match(r"^BIL\b", val, re.I):
+            cl_shipper = val
+            break
+
+    if not cl_shipper:
+        m_cl_box = re.search(r"\*\*1\.\s*Shipper\*\*:\s*([^\n]+)", checklist_text, re.I)
+        if m_cl_box:
+            parts = [
+                p.strip() for p in m_cl_box.group(1).split("|")
+                if p.strip() and not re.search(r"\b(?:INTER\s+COMPANY\s+AMOUNT|TOTAL\s+AMOUNT|INCOTERMS)\b", p, re.I)
+            ]
+            if parts:
+                cl_shipper = parts[0]
 
     if cl_shipper.upper().startswith("BIVN"):
         cl_disp = "BIVN (BROTHER INDUSTRIES (VIETNAM) LTD.)"
@@ -823,59 +1003,1077 @@ def extract_shipper_comparison(checklist_text: str, bl_text: str) -> dict[str, A
     }
 
 
-def extract_delivery_to_comparison(checklist_text: str, bl_text: str) -> dict[str, Any] | None:
-    """Dynamically extract and reconcile Delivery To / Consignee destination between BL Check List and BL."""
-    cl_deliv = ""
-    m_cl_all = re.findall(
-        r"DELIVERY\s+TO[^\n]*\n\s*([^\n]+(?:\n\s*[^\n]+){1,6})",
-        checklist_text,
-        re.I,
-    )
-    for block in m_cl_all:
-        lines = [l.strip() for l in block.splitlines() if l.strip() and not re.match(r"^(?:CONSIGNEE|NOTIFY|ORDER|TTL|SAP\s*CODE)\b", l, re.I)]
-        cand = " ".join(lines)
-        if "FM LOGISTIC" in cand.upper() or "ATHIES" in cand.upper():
-            cl_deliv = cand
+def extract_delivery_to_comparison(
+    checklist_text: str,
+    bl_text: str,
+    equivalent_bl_fields: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Compare Checklist DELIVERY TO with an explicitly allowed BL field."""
+
+    def normalize(value: str) -> str:
+        value = unicodedata.normalize("NFKC", value or "")
+        return re.sub(r"[^A-Z0-9]", "", value.upper())
+
+    def clean_value(value: str) -> str:
+        value = unicodedata.normalize("NFKC", value or "")
+        value = re.sub(r"(?:\(\s*\d+\s*\)\s*)?\bSAP\s*CODE\b\s*:?\s*[A-Z0-9_\-]*", " ", value, flags=re.I)
+        return " ".join(value.replace("|", " ").split()).strip(" .;")
+
+    def has_value(value: str) -> bool:
+        compact = normalize(value)
+        return (
+            compact not in {
+                "", "NA", "NONE", "NOTAPPLICABLE",
+                "KHONGKHAIBAO", "KHONGCO",
+            }
+            and re.fullmatch(r"X+", compact) is None
+        )
+
+    def consolidate_candidates(candidates: list[str]) -> list[str]:
+        # 1. Deduplicate by normalized alphanumeric string (keep longest formatted string)
+        by_norm: dict[str, str] = {}
+        for c in candidates:
+            nc = normalize(c)
+            if not nc:
+                continue
+            if nc not in by_norm or len(c) > len(by_norm[nc]):
+                by_norm[nc] = c
+
+        norms = list(by_norm.keys())
+        # 2. Subsumption: if candidate A is a prefix/substring of candidate B (e.g. the 1-line
+        #    'DELIVERY TO: BROTHER INTERNATIONAL CORP.' summary under TO/ETA vs the full 7-line
+        #    'DELIVERY TO SAP CODE:...' party block, or a height-truncated Form Box vs full block),
+        #    keep the complete block B.
+        kept_norms = [
+            na for na in norms
+            if not any(na != nb and len(na) < len(nb) and na in nb for nb in norms)
+        ]
+        return [by_norm[na] for na in kept_norms]
+
+    def extract_values(text: str, label: str) -> list[str]:
+        text = unicodedata.normalize("NFKC", text or "")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        values: list[str] = []
+
+        label_re = r"[ \t]+".join(
+            re.escape(part) for part in label.split()
+        )
+
+        # Structured FORM BOXES: keep the value on the same line.
+        form_pattern = re.compile(
+            rf"^[ \t]*-[ \t]*\*\*"
+            rf"(?:\d+\.[ \t]*)?{label_re}"
+            rf"\*\*[ \t]*:[ \t]*([^\n]*)$",
+            re.IGNORECASE | re.MULTILINE,
+        )
+
+        for match in form_pattern.finditer(text):
+            value = clean_value(match.group(1))
+            if has_value(value) and value not in values:
+                values.append(value)
+
+        # Raw text: support a value on the label line or below it.
+        raw_pattern = re.compile(
+            rf"^[ \t]*{label_re}\b[ \t]*:?[ \t]*(.*)$",
+            re.IGNORECASE,
+        )
+
+        stop_pattern = re.compile(
+            r"^(?:"
+            r"CONSIGNEE\b|SHIPPER\b|NOTIFY\b"
+            r"|DELIVERY[ \t]+TO\b"
+            r"|PLACE[ \t]+OF\b|PORT[ \t]+OF\b"
+            r"|INVOICE[ \t]*NO\b|ORDER\b|TTL\b|TOTAL\b|G-TOTAL\b|S-TOTAL\b"
+            r"|STUFFING[ \t]*PLAN\b|SAP[ \t]*CODE\b"
+            r"|VESSEL\b|OCEAN[ \t]+VESSEL\b"
+            r"|AS[ \t]+(?:THE[ \t]+)?CARRIER\b"
+            r"|\d[\d,.]*[ \t]+\d[\d,.]*$"
+            r"|===|###"
+            r")",
+            re.IGNORECASE,
+        )
+
+        lines = text.splitlines()
+
+        for index, line in enumerate(lines):
+            match = raw_pattern.match(line)
+            if not match:
+                continue
+
+            # Multi-column raw text needs a coordinate-aware extractor.
+            # Do not guess which following column belongs to this field.
+            if "|" in line:
+                continue
+
+            inline = re.split(
+                r"\bSAP[ \t]*CODE\b",
+                match.group(1),
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0].strip()
+
+            block: list[str] = [inline] if inline else []
+
+            for next_line in lines[index + 1:]:
+                next_line = next_line.strip()
+
+                if not next_line:
+                    continue
+
+                if stop_pattern.match(next_line):
+                    break
+
+                if "|" in next_line:
+                    break
+
+                block.append(next_line)
+
+            value = clean_value("\n".join(block))
+            if has_value(value) and value not in values:
+                values.append(value)
+
+        return consolidate_candidates(values)
+
+    # Checklist must always use DELIVERY TO, never the standalone TO field.
+    cl_values = extract_values(checklist_text, "DELIVERY TO")
+
+    # Exact field first. Alternatives must be explicitly configured.
+    bl_values: list[str] = []
+    bl_source = ""
+
+    for label in dict.fromkeys(("DELIVERY TO", *equivalent_bl_fields)):
+        candidates = extract_values(bl_text, label)
+        if candidates:
+            bl_values = candidates
+            bl_source = label
             break
-        elif not cl_deliv:
-            cl_deliv = cand
 
-    bl_deliv = ""
-    m_bl_all = re.findall(
-        r"DELIVERY\s+TO[^\n]*\n\s*([^\n]+(?:\n\s*[^\n]+){1,6})",
-        bl_text,
-        re.I,
-    )
-    for block in m_bl_all:
-        lines = [l.strip() for l in block.splitlines() if l.strip() and not re.match(r"^(?:YUSEN|AS\s+THE\s+CARRIER|AS\s+CARRIER)\b", l, re.I)]
-        cand = " ".join(lines)
-        if cand:
-            bl_deliv = cand
-            break
+    cl_deliv = cl_values[0] if len(cl_values) == 1 else ""
+    bl_deliv = bl_values[0] if len(bl_values) == 1 else ""
+    
+    # Distinguish "label absent on BL" from "label present but unread".
+    bl_label_present = re.search(
+        r"\bDELIVERY[ \t]+TO\b",
+        unicodedata.normalize("NFKC", bl_text or ""),
+        flags=re.IGNORECASE,
+    ) is not None
 
-    if not cl_deliv and not bl_deliv:
-        return None
-
-    clean_cl = re.sub(r"[^A-Z0-9]", "", cl_deliv.upper())
-    clean_bl = re.sub(r"[^A-Z0-9]", "", bl_deliv.upper())
-    is_ok = bool(clean_cl and clean_bl and (clean_cl in clean_bl or clean_bl in clean_cl or ("FM" in clean_cl and "FM" in clean_bl)))
-
-    cl_final = cl_deliv if cl_deliv else "Không tìm thấy trên Check List"
-    bl_final = bl_deliv if bl_deliv else "N/A (Không có dữ liệu)"
-
-    if not cl_deliv or not bl_deliv:
-        verdict = "**KHÔNG TÌM THẤY** (Bảng 2)"
-    elif is_ok:
-        verdict = "**ĐÚNG** (Bảng 1)"
+    if len(cl_values) > 1 or len(bl_values) > 1:
+        status = "KHÔNG HIỂU"
+        detail = (
+            "Có nhiều giá trị DELIVERY TO hoặc trường tương ứng; "
+            "chưa đủ cơ sở chọn một giá trị."
+        )
+    elif cl_deliv and not bl_deliv and not bl_label_present:
+        status = "KHÔNG TÌM THẤY"
+        detail = "BL không có ô DELIVERY TO."
+    elif not cl_deliv or not bl_deliv:
+        status = "KHÔNG HIỂU"
+        detail = "Chưa trích được đủ hai giá trị để đối chiếu."
+    elif normalize(cl_deliv) == normalize(bl_deliv):
+        status = "ĐÚNG"
+        detail = (
+            f"DELIVERY TO trên Checklist khớp trường "
+            f"{bl_source} trên BL sau chuẩn hóa định dạng."
+        )
     else:
-        verdict = "**SAI** (Bảng 2)"
+        status = "SAI"
+        detail = (
+            f"DELIVERY TO trên Checklist khác trường "
+            f"{bl_source} trên BL sau chuẩn hóa định dạng."
+        )
+
+    result = {
+        "cl_deliv": cl_deliv or "Chưa xác định",
+        "bl_deliv": bl_deliv or "Chưa xác định",
+        "bl_source": bl_source or "Chưa xác định",
+        "cl_candidates": cl_values,
+        "bl_candidates": bl_values,
+        "status": status,
+        "is_ok": status == "ĐÚNG",
+        "verdict": (
+            f"**{status}** "
+            f"({'Bảng 1' if status == 'ĐÚNG' else 'Bảng 2'})"
+        ),
+        "detail": detail,
+    }
+
+    logger.info("[DEBUG DELIVERY TO RESULT] %r", result)
+    return result
+    
+# ---------------------------------------------------------------------------
+# Deterministic Notify Party extraction and comparison
+# ---------------------------------------------------------------------------
+
+_EMPTY_PARTY_MARKERS = {
+    "",
+    "SAPCODE",
+    "NA",
+    "NONE",
+    "NOTAPPLICABLE",
+    "KHONGCO",
+    "KHONGKHAIBAO",
+}
+
+
+def _compact_party_text(value: str) -> str:
+    """Normalize party text for reliable comparison."""
+    normalized = unicodedata.normalize(
+        "NFKC",
+        value or "",
+    ).upper()
+
+    return re.sub(
+        r"[^A-Z0-9@]+",
+        "",
+        normalized,
+    )
+
+
+def _is_empty_party_value(value: str) -> bool:
+    """Return True when a party field contains no business value."""
+    compact = _compact_party_text(value)
+
+    if compact in _EMPTY_PARTY_MARKERS:
+        return True
+
+    # Chỉ có nhãn SAP CODE, không có tên công ty hoặc địa chỉ.
+    if compact.startswith("SAPCODE") and len(compact) <= 15:
+        return True
+
+    return False
+
+
+def _clean_party_block(value: str) -> str:
+    """
+    Remove legal text from the right-hand column while preserving
+    the company/address block from the left-hand column.
+    """
+    cleaned_lines: list[str] = []
+
+    stop_patterns = (
+        "FORWARDINGAGENTREFERENCE",
+        "EXPORTIMPORTREFERENCE",
+        "DOCUMENTOFTITLE",
+        "TERMSANDCONDITIONS",
+        "OCEANFREIGHTFORWARDING",
+        "WEBSITEATHTTPS",
+        "VESSELANDVOYAGE",
+        "PLACEANDDATEOFISSUE",
+        "PLACEOFDELIVERY",
+        "PORTOFLOADING",
+        "PORTOFDISCHARGE",
+    )
+
+    for raw_line in (value or "").splitlines():
+        # OCR có thể trộn cột trái và cột phải bằng dấu "|".
+        left_column = raw_line.split("|", 1)[0].strip()
+
+        if not left_column:
+            continue
+
+        compact_line = _compact_party_text(left_column)
+
+        if any(
+            pattern in compact_line
+            for pattern in stop_patterns
+        ):
+            break
+
+        cleaned_lines.append(left_column)
+
+    return "\n".join(cleaned_lines).strip()
+
+
+def _extract_checklist_notify_parties(
+    text: str,
+) -> dict[int, str]:
+    """
+    Extract NOTIFY PARTY (1) and (2) from a BL Check List.
+
+    A block ends at the next party or another known checklist field.
+    """
+    parties: dict[int, str] = {}
+
+    pattern = re.compile(
+        r"NOTIFY\s*PARTY\s*\(\s*([12])\s*\)"
+        r"[^\n]*"
+        r"\n"
+        r"(.*?)"
+        r"(?="
+        r"NOTIFY\s*PARTY\s*\(\s*[12]\s*\)"
+        r"|DELIVERY\s*TO"
+        r"|CONSIGNEE"
+        r"|INVOICE\s*NO"
+        r"|ORDER\s*NO"
+        r"|TTL\b"
+        r"|STUFFING\s*PLAN"
+        r"|$"
+        r")",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    for match in pattern.finditer(text or ""):
+        number = int(match.group(1))
+        block = _clean_party_block(
+            match.group(2)
+        )
+
+        parties[number] = block
+
+    # Một số parser giữ "SAP CODE" trên dòng riêng nhưng không có value.
+    for number in (1, 2):
+        parties.setdefault(number, "")
+
+    return parties
+
+
+def _extract_bl_notify_parties(
+    text: str,
+) -> dict[int, str]:
+    """
+    Extract Notify Party blocks from a BL/Sea Waybill.
+
+    Unnumbered Notify Party is party 1.
+    Also Notify / Second Notify is party 2.
+    OCR forms such as NotifyParty are supported.
+    """
+    parties: dict[int, str] = {}
+
+    bl_text = unicodedata.normalize("NFKC", text or "")
+    bl_text = bl_text.replace("\r\n", "\n").replace("\r", "\n")
+    
+    # Exclude generated FORM BOXES rows from this raw-layout extractor.
+    # Do not modify the original text used by other extractors.
+    raw_lines = [
+        line
+        for line in bl_text.splitlines()
+        if not re.match(r"^[ \t]*-[ \t]*\*\*", line)
+    ]
+    bl_text = "\n".join(raw_lines)
+
+    # Remove the complete parenthesized disclaimer, including line breaks.
+    bl_text = re.sub(
+        r"\(\s*No\s+responsibility\b[^)]*\)",
+        "",
+        bl_text,
+        flags=re.IGNORECASE,
+    )
+    # Tìm Notify Party 2 trước để tránh Party 1 nuốt toàn bộ phần sau.
+    party2_pattern = re.compile(
+        r"^[ \t.*-]*(?:"
+        r"ALSO[ \t]*NOTIFY(?:[ \t]*PARTY)?"
+        r"|SECOND[ \t]*NOTIFY(?:[ \t]*PARTY)?"
+        r"|NOTIFY[ \t]*PARTY[ \t]*(?:2\b|\([ \t]*2[ \t]*\))"
+        r"|CONTINUED[ \t]*FROM[ \t]*NOTIFY[ \t]*PART(?:Y|IES)"
+        r")"
+        r"[^\n]*\n"
+        r"(.*?)"
+        r"(?="
+        r"^[ \t]*(?:"
+        r"EMPLOYEE[ \t]+NUMBER\b"
+        r"|LLOYD[S']*[ \t]*/?[ \t]*IMO\b"
+        r"|[\"']?ANY[ \t]+DISPUTE\b"
+        r"|PORT[ \t]*OF[ \t]*DISCHARGE\b"
+        r"|FORWARDING[ \t]*AGENT\b"
+        r"|EXPORT[ \t]*/?[ \t]*IMPORT[ \t]*REFERENCE\b"
+        r"|DELIVERY[ \t]*TO\b"
+        r"|VESSEL\b"
+        r"|PORT[ \t]*OF[ \t]*LOADING\b"
+        r")"
+        r"|\Z"
+        r")",
+        re.IGNORECASE | re.DOTALL | re.MULTILINE,
+    )
+
+    party2_match = party2_pattern.search(bl_text)
+    
+        # Diagnostic only: inspect the actual continuation text.
+    source_match = re.search(
+        r"NOTIFY|WM\s*STONE",
+        bl_text,
+        flags=re.IGNORECASE,
+    )
+
+    if source_match is None:
+        logger.info(
+            "[DEBUG NOTIFY 2 INPUT] NO_NOTIFY_OR_WM_STONE"
+        )
+
+
+    if party2_match:
+        raw_party2 = party2_match.group(1)
+        parties[2] = _clean_party_block(raw_party2)
+
+        logger.info(
+            "[DEBUG NOTIFY 2 MATCH] header=%r raw=%r cleaned=%r",
+            bl_text[party2_match.start():party2_match.start(1)],
+            raw_party2,
+            parties[2],
+        )
+    else:
+        logger.info("[DEBUG NOTIFY 2 MATCH] NOT_FOUND")
+        
+        # Fallback: continuation header and values in the right column.
+    if not parties.get(2):
+        collecting = False
+        notify2_lines: list[str] = []
+
+        for raw_line in bl_text.splitlines():
+            left, separator, right = raw_line.partition("|")
+
+            if not collecting:
+                if separator and re.search(
+                    r"\bCONTINUED[ \t]+FROM[ \t]+"
+                    r"NOTIFY[ \t]*PART(?:Y|IES)\b",
+                    right,
+                    flags=re.IGNORECASE,
+                ):
+                    collecting = True
+
+                continue
+
+            # Read the right column when present.
+            # Otherwise preserve standalone address/contact lines.
+            value = (right if separator else left).strip()
+
+            if not value:
+                continue
+
+            # Stop at the next field or the start of legal terms.
+            if re.match(
+                r"^(?:"
+                r"LLOYD[S'’]*[ \t]*/?[ \t]*IMO\b"
+                r"|EMPLOYEE[ \t]+NUMBER\b"
+                r"|[\"“']?ANY[ \t]+DISPUTE\b"
+                r"|PORT[ \t]+OF[ \t]+DISCHARGE\b"
+                r"|NOTIFY[ \t]*PART(?:Y|IES)\b"
+                r"|===|###"
+                r")",
+                value,
+                flags=re.IGNORECASE,
+            ):
+                break
+
+            notify2_lines.append(value)
+
+        if notify2_lines:
+            raw_party2 = "\n".join(notify2_lines)
+            parties[2] = _clean_party_block(raw_party2)
+
+            logger.info(
+                "[DEBUG NOTIFY 2 RIGHT COLUMN] raw=%r cleaned=%r",
+                raw_party2,
+                parties[2],
+            )
+ 
+    party1_pattern = re.compile(
+        r"^[ \t]*(?:"
+        r"FIRST[ \t]*NOTIFY(?:[ \t]*PARTY)?"
+        r"|NOTIFY[ \t]*PART(?:Y|IES)"
+        r"(?:[ \t]*\([ \t]*1[ \t]*\))?"
+        r")"
+        r"(?![ \t]*(?:2\b|\([ \t]*2[ \t]*\)))"
+        r"[^\n]*\n"
+        r"(.*?)"
+        r"(?="
+        r"^[ \t.*-]*(?:"
+        r"ALSO[ \t]*NOTIFY"
+        r"|SECOND[ \t]*NOTIFY"
+        r"|NOTIFY[ \t]*PARTY[ \t]*(?:2\b|\([ \t]*2[ \t]*\))"
+        r"|CONTINUED[ \t]*FROM[ \t]*NOTIFY[ \t]*PART(?:Y|IES)"
+        r"|POINT[ \t]*AND[ \t]*COUNTRY[ \t]*OF[ \t]*ORIGIN"
+        r"|PRE[ \t-]*CARRIAGE[ \t]*BY"
+        r"|OCEAN[ \t]*VESSEL"
+        r"|VESSEL"
+        r"|PORT[ \t]*OF[ \t]*LOADING"
+        r"|DELIVERY[ \t]*TO"
+        r")"
+        r"|\Z"
+        r")",
+        re.IGNORECASE | re.DOTALL | re.MULTILINE,
+    )
+
+    party1_match = party1_pattern.search(bl_text)
+
+    if party1_match:
+        raw_block = party1_match.group(1)
+        filtered_lines: list[str] = []
+        
+        for line in raw_block.splitlines():
+            # Chi giu cot trai, bo noi dung cot ben phai.
+            left_column = line.split("|", 1)[0].strip()
+
+            if not left_column:
+                continue
+
+            normalized = re.sub(
+                r"[^a-z0-9]",
+                "",
+                left_column.lower(),
+            )
+
+            # Bo dong nhieu, khong dung vong lap.
+            if normalized.startswith((
+                "freightforwardingtermsandconditions",
+                "websiteathttps",
+                "https",
+                "http",
+                "forwardingagent",
+                "exportimportreference",
+                "exportlmportreference",
+            )):
+                continue
+
+            filtered_lines.append(left_column)
+
+        block_for_clean = "\n".join(filtered_lines)
+        parties[1] = _clean_party_block(block_for_clean)
+
+    parties.setdefault(1, "")
+    parties.setdefault(2, "")
+
+    return parties
+
+
+def _extract_party_identity_tokens(
+    value: str,
+) -> set[str]:
+    """
+    Extract stable identifiers:
+    company name, email, postcode, VAT, EORI, EIN and TRN.
+    """
+    normalized = unicodedata.normalize(
+        "NFKC",
+        value or "",
+    ).upper()
+
+    tokens: set[str] = set()
+
+    email_matches = re.findall(
+        r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}",
+        normalized,
+    )
+
+    for email in email_matches:
+        tokens.add(
+            _compact_party_text(email)
+        )
+
+    registration_matches = re.findall(
+        r"\b(?:VAT|EORI|EIN|TRN)"
+        r"\s*[+:]?\s*[A-Z0-9 ]{5,25}",
+        normalized,
+    )
+
+    for registration in registration_matches:
+        tokens.add(
+            _compact_party_text(registration)
+        )
+
+    postcode_matches = re.findall(
+        r"\b[A-Z]{1,2}\d{1,2}[A-Z]?"
+        r"\s*\d[A-Z]{2}\b"
+        r"|\b\d{5}(?:-\d{4})?\b",
+        normalized,
+    )
+
+    for postcode in postcode_matches:
+        tokens.add(
+            _compact_party_text(postcode)
+        )
+
+    # Tên pháp nhân thường nằm ở dòng đầu tiên.
+    meaningful_lines = [
+        line.strip()
+        for line in (value or "").splitlines()
+        if line.strip()
+    ]
+
+    for line in meaningful_lines[:2]:
+        compact_line = _compact_party_text(
+            line
+        )
+
+        if len(compact_line) >= 8:
+            tokens.add(compact_line)
 
     return {
-        "cl_deliv": cl_final,
-        "bl_deliv": bl_final,
-        "is_ok": is_ok,
-        "verdict": verdict,
+        token
+        for token in tokens
+        if token
     }
+
+
+def _compare_party_values(
+    checklist_value: str,
+    bl_value: str,
+) -> tuple[bool, list[str]]:
+    """Compare two party blocks using stable identifiers."""
+    checklist_compact = _compact_party_text(
+        checklist_value
+    )
+    bl_compact = _compact_party_text(
+        bl_value
+    )
+
+    # Toàn bộ một bên nằm trong bên còn lại sau chuẩn hóa.
+    direct_match = bool(
+        checklist_compact
+        and bl_compact
+        and (
+            checklist_compact in bl_compact
+            or bl_compact in checklist_compact
+        )
+    )
+
+    checklist_tokens = (
+        _extract_party_identity_tokens(
+            checklist_value
+        )
+    )
+    bl_tokens = _extract_party_identity_tokens(
+        bl_value
+    )
+
+    matched_tokens: list[str] = []
+
+    for checklist_token in checklist_tokens:
+        if checklist_token in bl_compact:
+            matched_tokens.append(
+                checklist_token
+            )
+            continue
+
+        for bl_token in bl_tokens:
+            if (
+                checklist_token in bl_token
+                or bl_token in checklist_token
+            ):
+                matched_tokens.append(
+                    checklist_token
+                )
+                break
+
+    # Không chỉ dựa vào một token đơn lẻ.
+    identity_match = len(set(matched_tokens)) >= 2
+
+    return (
+        direct_match or identity_match,
+        sorted(set(matched_tokens)),
+    )
+
+
+def extract_notify_party_comparison(
+    checklist_text: str,
+    bl_text: str,
+) -> list[dict[str, Any]]:
+    """
+    Deterministically compare Notify Party 1 and 2.
+
+    The model is not involved in deciding the status.
+    """
+    checklist_parties = (
+        _extract_checklist_notify_parties(
+            checklist_text
+        )
+    )
+
+    bl_parties = _extract_bl_notify_parties(
+        bl_text
+    )
+    
+        # Debug text dau vao, khong thay doi logic trich xuat.
+    logger.info(
+        "[DEBUG NOTIFY EXTRACTED] checklist=%r bl=%r",
+        checklist_parties,
+        bl_parties,
+    )
+    
+    comparison_results: list[
+        dict[str, Any]
+    ] = []
+
+    for number in (1, 2):
+        checklist_value = (
+            checklist_parties.get(number, "")
+        )
+        bl_value = bl_parties.get(number, "")
+
+        checklist_has_value = (
+            not _is_empty_party_value(
+                checklist_value
+            )
+        )
+        bl_has_value = (
+            not _is_empty_party_value(
+                bl_value
+            )
+        )
+
+        if (
+            not checklist_has_value
+            and not bl_has_value
+        ):
+            status = "ĐÚNG"
+            detail = (
+                "Hai tài liệu đều không khai báo "
+                f"Notify Party {number}."
+            )
+            matched_tokens: list[str] = []
+
+        elif (
+            checklist_has_value
+            and not bl_has_value
+        ):
+            status = "KHÔNG TÌM THẤY"
+            detail = (
+                f"Check List có Notify Party {number}, "
+                "nhưng không trích được dữ liệu tương ứng trên BL."
+            )
+            matched_tokens = []
+
+        elif (
+            not checklist_has_value
+            and bl_has_value
+        ):
+            status = "SAI"
+            detail = (
+                f"Check List không khai báo Notify Party {number}, "
+                "nhưng BL có Notify Party tương ứng."
+            )
+            matched_tokens = []
+
+        else:
+            is_match, matched_tokens = (
+                _compare_party_values(
+                    checklist_value,
+                    bl_value,
+                )
+            )
+
+            if is_match:
+                status = "ĐÚNG"
+                detail = (
+                    "Khớp theo tên pháp nhân và "
+                    "các dấu hiệu định danh đã chuẩn hóa."
+                )
+            else:
+                status = "SAI"
+                detail = (
+                    "Có dữ liệu ở cả hai tài liệu nhưng "
+                    "không đủ dấu hiệu để xác nhận cùng một party."
+                )
+
+        comparison_results.append({
+            "number": number,
+            "checklist_value": (
+                checklist_value
+                if checklist_has_value
+                else "Không khai báo"
+            ),
+            "bl_value": (
+                bl_value
+                if bl_has_value
+                else "Không khai báo"
+            ),
+            "status": status,
+            "is_ok": status == "ĐÚNG",
+            "matched_tokens": matched_tokens,
+            "detail": detail,
+        })
+
+    return comparison_results
+
+def extract_port_of_loading_comparison(
+    checklist_text: str,
+    bl_text: str,
+) -> dict[str, str]:
+    """Compare the Checklist FROM field with BL PORT OF LOADING."""
+
+    def prepare(text: str) -> str:
+        return (
+            unicodedata.normalize("NFKC", text or "")
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+        )
+
+    def clean(value: str) -> str:
+        return " ".join(value.split()).strip(" :;")
+
+    def normalize(value: str) -> str:
+        return re.sub(r"[\W_]+", "", clean(value).upper())
+
+    def is_usable(value: str) -> bool:
+        compact = normalize(value)
+
+        return (
+            compact not in {
+                "",
+                "NA",
+                "NONE",
+                "NULL",
+                "NOTAPPLICABLE",
+                "CHUAXACDINH",
+            }
+            and re.fullmatch(r"X+", compact) is None
+        )
+
+    def unique_values(values: list[str]) -> list[str]:
+        result: dict[str, str] = {}
+
+        for value in values:
+            value = clean(value)
+
+            if is_usable(value):
+                result.setdefault(normalize(value), value)
+
+        return list(result.values())
+
+    def split_cells(line: str) -> list[str]:
+        # Preserve empty pipe-delimited cells to avoid shifting columns.
+        if "|" in line:
+            return [cell.strip() for cell in line.split("|")]
+
+        return [
+            cell.strip()
+            for cell in re.split(r"[ \t]{2,}", line.strip())
+        ]
+    
+    def cell_starts(line: str) -> list[int]:
+        # Start offset of each cell; used to check column alignment.
+        if "|" in line:
+            return []
+
+        return [
+            match.start()
+            for match in re.finditer(r"\S+(?:[ \t]\S+)*", line)
+        ]
+
+    field_start = re.compile(
+        r"^(?:"
+        r"FROM\b|TO\b|VIA\b|ETD\b|ETA\b"
+        r"|PORT[ \t]+OF\b|PLACE[ \t]+OF\b"
+        r"|DELIVERY[ \t]+TO\b"
+        r"|CONSIGNEE\b|SHIPPER\b|NOTIFY\b"
+        r"|VESSEL\b|OCEAN[ \t]+VESSEL\b"
+        r"|INVOICE\b|ORDER\b|SAP[ \t]+CODE\b"
+        r"|===|###"
+        r")",
+        flags=re.IGNORECASE,
+    )
+
+    route_pattern = re.compile(
+        r"\bFROM\b[^\n]*\bTO\b",
+        flags=re.IGNORECASE,
+    )
+
+    def valid_candidate(value: str) -> bool:
+        value = clean(value)
+
+        return (
+            is_usable(value)
+            and not field_start.match(value)
+            and not route_pattern.search(value)
+        )
+
+    def extract_values(text: str, label: str) -> list[str]:
+        text = prepare(text)
+
+        label_re = r"[ \t]+".join(
+            re.escape(word) for word in label.split()
+        )
+
+        # Structured field:
+        # - **7. Port of Loading**: Haiphong
+        # - **FROM**: BAC NINH
+        form_pattern = re.compile(
+            rf"^[ \t]*-[ \t]*\*\*"
+            rf"(?:\d+\.[ \t]*)?{label_re}"
+            rf"[ \t]*\*\*[ \t]*:[ \t]*([^\n]*)$",
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+
+        form_values: list[str] = []
+
+        for match in form_pattern.finditer(text):
+            candidate = clean(match.group(1))
+
+            # Reject values containing merged columns or route sentences.
+            if "|" not in candidate and valid_candidate(candidate):
+                form_values.append(candidate)
+
+        form_values = unique_values(form_values)
+
+        if form_values:
+            return form_values
+
+        # Raw layout: accept only an exact label cell.
+        # "FROM HAI PHONG TO LONG BEACH" is not an exact FROM label.
+        exact_label = re.compile(
+            rf"{label_re}[ \t]*:?",
+            flags=re.IGNORECASE,
+        )
+
+        lines = text.splitlines()
+        raw_values: list[str] = []
+
+        for index, line in enumerate(lines):
+            header_cells = split_cells(line)
+
+            target_columns = [
+                column
+                for column, cell in enumerate(header_cells)
+                if exact_label.fullmatch(cell)
+            ]
+
+            if not target_columns:
+                continue
+
+            header_starts = cell_starts(line)
+            matched_row = None
+
+            # Look a few lines below: interleaved text from another
+            # column (e.g. "REQUEST") may sit between label and value.
+            for next_row in lines[index + 1:index + 4]:
+                if not next_row.strip():
+                    continue
+
+                value_cells = split_cells(next_row)
+
+                # Stop at the next label row, e.g. "VIA   ETA".
+                if any(field_start.match(cell) for cell in value_cells):
+                    break
+
+                if len(value_cells) != len(header_cells):
+                    continue
+
+                # Require every cell to start near its header cell.
+                value_starts = cell_starts(next_row)
+                if all(
+                    abs(h - v) <= 3
+                    for h, v in zip(header_starts, value_starts)
+                ):
+                    matched_row = value_cells
+                    break
+
+            if matched_row is None:
+                logger.info(
+                    "[DEBUG POL COLUMN MISMATCH] label=%r header=%r",
+                    label,
+                    line,
+                )
+                continue
+
+            for column in target_columns:
+                candidate = clean(matched_row[column])
+
+                if valid_candidate(candidate):
+                    raw_values.append(candidate)
+
+            # if not next_row:
+            #     continue
+
+            # value_cells = split_cells(next_row)
+
+            # # Without coordinates, do not guess a shifted column.
+            # if len(header_cells) != len(value_cells):
+            #     logger.info(
+            #         "[DEBUG POL COLUMN MISMATCH] "
+            #         "label=%r header=%r next_row=%r",
+            #         label,
+            #         line,
+            #         next_row,
+            #     )
+            #     continue
+
+            # for column in target_columns:
+            #     candidate = clean(value_cells[column])
+
+            #     if valid_candidate(candidate):
+            #         raw_values.append(candidate)
+
+        return unique_values(raw_values)
+
+    checklist_source = prepare(checklist_text)
+
+    for index, match in enumerate(
+        re.finditer(
+            r"\bFROM\b",
+            checklist_source,
+            flags=re.IGNORECASE,
+        ),
+        start=1,
+    ):
+        logger.info(
+            "[DEBUG CHECKLIST FROM SOURCE %d] %r",
+            index,
+            checklist_source[
+                max(0, match.start() - 100):
+                min(len(checklist_source), match.end() + 350)
+            ],
+        )
+    checklist_values = extract_values(checklist_text, "FROM")
+    bl_values = extract_values(bl_text, "PORT OF LOADING")
+
+    checklist_value = (
+        checklist_values[0]
+        if len(checklist_values) == 1
+        else ""
+    )
+    bl_value = (
+        bl_values[0]
+        if len(bl_values) == 1
+        else ""
+    )
+
+    if len(checklist_values) > 1 or len(bl_values) > 1:
+        status = "KHÔNG HIỂU"
+        detail = (
+            "Có nhiều giá trị khác nhau cho ô FROM trên Checklist "
+            "hoặc PORT OF LOADING trên BL; "
+            "chưa đủ cơ sở chọn giá trị đối chiếu."
+        )
+
+    elif not checklist_value or not bl_value:
+        status = "KHÔNG HIỂU"
+        detail = (
+            "Chưa trích được đủ giá trị ô FROM trên Checklist "
+            "và PORT OF LOADING trên BL. "
+            "Không dùng dòng FROM ... TO ... trong REQUEST "
+            "để thay thế ô FROM."
+        )
+
+    elif normalize(checklist_value) == normalize(bl_value):
+        status = "ĐÚNG"
+        detail = (
+            "Ô FROM trên Checklist khớp PORT OF LOADING trên BL "
+            "sau chuẩn hóa chữ hoa/thường, khoảng trắng và dấu câu."
+        )
+
+    else:
+        status = "SAI"
+        detail = (
+            f"Ô FROM trên Checklist ({checklist_value}) khác "
+            f"PORT OF LOADING trên BL ({bl_value})."
+        )
+
+    result = {
+        "checklist_value": checklist_value or "Chưa xác định",
+        "bl_value": bl_value or "Chưa xác định",
+        "status": status,
+        "detail": detail,
+    }
+
+    logger.info(
+        "[DEBUG PORT OF LOADING RESULT] "
+        "checklist_candidates=%r bl_candidates=%r result=%r",
+        checklist_values,
+        bl_values,
+        result,
+    )
+
+    return result
 
 def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> str:
     """Build a compact, high-signal pre-reconciled reference note for the 23-item comparison.
@@ -891,13 +2089,117 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
             f"- Hạng mục 1 (`SHIPPER`): BL Check List = `{shipper_res['cl_shipper']}` | "
             f"BL = `{shipper_res['bl_shipper']}` => Kết quả: {shipper_res['verdict']}."
         )
-    deliv_res = extract_delivery_to_comparison(checklist_text, bl_text)
+        # Add only business-approved equivalent BL field labels here.
+    
+    delivery_to_equivalent_fields: tuple[str, ...] = ()
+
+    deliv_res = extract_delivery_to_comparison(
+        checklist_text,
+        bl_text,
+        equivalent_bl_fields=delivery_to_equivalent_fields,
+    )
+
     if deliv_res:
         lines.append(
-            f"- Hạng mục 5 (`DELIVERY TO`): BL Check List = `{deliv_res['cl_deliv']}` | "
-            f"BL = `{deliv_res['bl_deliv']}` => Kết quả: {deliv_res['verdict']}."
+            "- Hạng mục 5 (`DELIVERY TO`): "
+            f"BL Check List, nguồn `DELIVERY TO` "
+            f"= `{deliv_res['cl_deliv']}`; "
+            f"BL, nguồn `{deliv_res['bl_source']}` "
+            f"= `{deliv_res['bl_deliv']}`; "
+            f"Kết quả: {deliv_res['verdict']}. "
+            f"Chi tiết: {deliv_res['detail']}\n"
+            "Chỉ dẫn trình bày: Giữ nguyên nguồn và kết quả đối chiếu này. "
+            "Không lấy trường TO của Checklist hoặc kết quả hạng mục 16 để thay thế hạng mục 5. "
+            "Cột giải thích chỉ ghi nội dung Chi tiết ở trên, không chép các chỉ dẫn trình bày này vào bảng."
+        )
+        
+    notify_results = extract_notify_party_comparison(
+        checklist_text,
+        bl_text,
+    )
+
+    notify_1_res = next(
+        (
+            item
+            for item in notify_results
+            if item["number"] == 1
+        ),
+        None,
+    )
+
+    if notify_1_res:
+        lines.append(
+            f"- Hạng mục 3 (`NOTIFY PARTY 1`): "
+            f"BL Check List = `{notify_1_res['checklist_value']}` | "
+            f"BL = `{notify_1_res['bl_value']}` "
+            f"=> Kết quả: {notify_1_res['status']}. "
+            f"Chi tiết: {notify_1_res['detail']}"
         )
 
+    notify_2_res = next(
+        (
+            item
+            for item in notify_results
+            if item["number"] == 2
+        ),
+        None,
+    )
+
+    if notify_2_res:
+        lines.append(
+            f"- Hạng mục 4 (`NOTIFY PARTY 2`): "
+            f"BL Check List = `{notify_2_res['checklist_value']}` | "
+            f"BL = `{notify_2_res['bl_value']}` "
+            f"=> Kết quả: {notify_2_res['status']}. "
+            f"Chi tiết: {notify_2_res['detail']}"
+        )
+        
+    consignee_res = extract_consignee_comparison(
+        checklist_text,
+        bl_text,
+    )
+
+    # Keep each value on one line and avoid table separators.
+    cl_consignee = consignee_res["cl_consignee"] or "Chưa trích được"
+    bl_consignee = consignee_res["bl_consignee"] or "Chưa trích được"
+    
+    if consignee_res:
+        verdict_2 = f"**{consignee_res['status']}** ({'Bảng 1' if consignee_res['is_ok'] else 'Bảng 2'})"
+        lines.append(
+            "- Hạng mục 2 (`CONSIGNEE`): "
+            f"BL Check List = `{cl_consignee}`; "
+            f"BL = `{bl_consignee}`; "
+            f"Kết quả đối chiếu bằng code: {verdict_2}. "
+            f"Chi tiết: {consignee_res['detail']}\n"
+            "Chỉ dẫn trình bày: Khi trình bày hạng mục 2, dùng đầy đủ hai giá trị trên, "
+            "không thay bằng block CONSIGNEE trong text layout thô. "
+            "Cột giải thích chỉ ghi nội dung Chi tiết ở trên, không chép các chỉ dẫn trình bày này vào bảng."
+        )
+    
+    pol_res = extract_port_of_loading_comparison(
+        checklist_text,
+        bl_text,
+    )
+
+    if pol_res:
+        lines.append(
+            "- Hạng mục 14 (`PORT OF LOADING`): "
+            "Checklist, nguồn ô `FROM` = "
+            f"`{pol_res['checklist_value']}`; "
+            "BL, nguồn `PORT OF LOADING` = "
+            f"`{pol_res['bl_value']}`; "
+            f"Kết quả: **{pol_res['status']}**. "
+            f"Chi tiết: {pol_res['detail']}\n"
+            "Chỉ dẫn trình bày: "
+            "Xuất một dòng riêng với STT 14; "
+            "giữ nguyên giá trị và trạng thái do code trả về. "
+            "Không lấy dòng FROM ... TO ... trong REQUEST "
+            "thay thế ô FROM trên Checklist. "
+            "Số 7 trong FORM BOXES không phải STT đối chiếu. "
+            "Cột giải thích chỉ ghi nội dung Chi tiết ở trên, "
+            "không chép các chỉ dẫn trình bày này vào bảng."
+        )
+    
     # 1. Full-document cross-page Container & Totals reconciliation
     cl_conts = extract_document_containers(checklist_text, is_checklist=True)
     bl_conts = extract_document_containers(bl_text, is_checklist=False)
@@ -939,7 +2241,21 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
         bl_cont_nos = ", ".join(c["container_no"] for c in bl_conts)
         cl_seals = ", ".join(c["seal_no"] for c in cl_conts)
         bl_seals = ", ".join(c["seal_no"] for c in bl_conts)
-        cl_types_norm = ", ".join(sorted({c["type"] for c in cl_conts if c["type"] != "N/A"})) or "40HC"
+        cl_types_norm_list = sorted({c["type"] for c in cl_conts if c.get("type") and c["type"] != "N/A"})
+        cl_types_norm = ", ".join(cl_types_norm_list) if cl_types_norm_list else "N/A"
+
+        bl_types_norm_list = sorted({c["type"] for c in bl_conts if c.get("type") and c["type"] != "N/A"})
+        bl_types_norm = ", ".join(bl_types_norm_list) if bl_types_norm_list else "N/A"
+
+        cl_types_raw_list = [c["type_raw"] for c in cl_conts if c.get("type_raw") and c["type_raw"] != "N/A"]
+        cl_types_raw = ", ".join(dict.fromkeys(cl_types_raw_list)) if cl_types_raw_list else cl_types_norm
+
+        bl_types_raw_list = [c["type_raw"] for c in bl_conts if c.get("type_raw") and c["type_raw"] != "N/A"]
+        bl_types_raw = ", ".join(dict.fromkeys(bl_types_raw_list)) if bl_types_raw_list else bl_types_norm
+
+        cl_disp_8 = f"{cl_types_raw} ({cl_types_norm})" if (cl_types_raw and cl_types_raw != cl_types_norm and cl_types_norm != "N/A") else (cl_types_raw or cl_types_norm)
+        bl_disp_8 = f"{bl_types_raw} ({bl_types_norm})" if (bl_types_raw and bl_types_raw != bl_types_norm and bl_types_norm != "N/A") else (bl_types_raw or bl_types_norm)
+
         cl_w_list = ", ".join(c["weight_raw"] for c in cl_conts)
         bl_w_list = ", ".join(c["weight_raw"] for c in bl_conts)
         cl_c_list = ", ".join(c["cbm_raw"] for c in cl_conts)
@@ -955,8 +2271,8 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
         )
         v_8 = "**ĐÚNG** (Bảng 1)" if all_type_ok else "**SAI** (Bảng 2)"
         lines.append(
-            f"- Hạng mục 8 (`CONTAINER TYPE` - 1 dòng): BL Check List = `40HC:40FT 9FT 6IN DRY CONTAINER ({cl_types_norm})` | "
-            f"BL = `40' HIGH CUBE ({cl_types_norm})` => Kết quả: {v_8}."
+            f"- Hạng mục 8 (`CONTAINER TYPE` - 1 dòng): BL Check List = `{cl_disp_8}` | "
+            f"BL = `{bl_disp_8}` => Kết quả: {v_8}."
         )
         if cl_tot_pkgs > 0 and cl_tot_w > 0 and bl_tot_pkgs > 0 and bl_tot_w > 0:
             v_9 = "**ĐÚNG** (Bảng 1)" if all_pkgs_ok else "**SAI** (Bảng 2)"
@@ -996,8 +2312,8 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
 
         v_19 = "**ĐÚNG** (Bảng 1)" if all_no_ok else "**SAI** (Bảng 2)"
         lines.append(
-            f"- Hạng mục 19 (`Tổng số container + loại container`): BL Check List = `{len(cl_conts)} ({cl_cont_nos}) / 40HC` | "
-            f"BL = `{len(bl_conts)} ({bl_cont_nos}) / 40' HIGH CUBE` => Kết quả: {v_19}."
+            f"- Hạng mục 19 (`Tổng số container + loại container`): BL Check List = `{len(cl_conts)} ({cl_cont_nos}) / {cl_disp_8}` | "
+            f"BL = `{len(bl_conts)} ({bl_cont_nos}) / {bl_disp_8}` => Kết quả: {v_19}."
         )
 
         cl_terms = [c["movement"] for c in cl_conts if c.get("movement") and c["movement"] != "N/A"]

@@ -13,6 +13,7 @@ import os
 import sys
 import uuid
 import codecs
+import re
 from dataclasses import dataclass
 from typing import Any, Annotated
 
@@ -510,10 +511,12 @@ class ExportExcelRequest(BaseModel):
     title: str = "Báo cáo đối chiếu"
 
 
-@app.post("/api/v1/chat/export-excel")
+@app.post(
+    "/api/v1/chat/export-excel",
+    dependencies=[Depends(get_current_user)],
+)
 async def export_compare_excel(
     request: ExportExcelRequest,
-    current_user: CurrentUser = Depends(get_current_user),
 ):
     """Export comparison result markdown table to a formatted 2-sheet Excel file."""
     if not request.content or not request.content.strip():

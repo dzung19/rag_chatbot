@@ -28,6 +28,9 @@ import os
 import re
 import threading
 from typing import Any, Generator, Optional
+import re
+import threading
+import unicodedata
 
 import httpx
 
@@ -36,6 +39,9 @@ logger = logging.getLogger(__name__)
 _RAPIDOCR_ENGINE: Any = None
 _RAPIDOCR_LOCK = threading.Lock()
 
+def _normalize_text(text: str) -> str:
+    """Chuẩn hóa ký tự full-width/compatibility (ví dụ '，' → ',', '（' → '(')."""
+    return unicodedata.normalize("NFKC", text or "")
 
 def _get_rapidocr_engine() -> Any:
     """Reuse one local OCR engine per process; caller holds the OCR lock."""
@@ -150,10 +156,10 @@ _INVOICE_NO_RE = re.compile(
 _BL_LABEL_ANCHORS: list[tuple[str, re.Pattern[str]]] = [
     ("1. Shipper", re.compile(r"^(?:1\.?\s*)?Shipper\b(?!\s*['’]s\s*ref)", re.I)),
     ("2. Consignee", re.compile(r"^(?:2\.?\s*)?Consignee\b", re.I)),
-    ("3. Notify Party", re.compile(r"^(?:3\.?\s*)?Notify\s+Part(?:y|ies)(?:\s*\(\s*1\s*\))?(?!\s*(?:2|\(\s*2\s*\)))", re.I)),
+    ("3. Notify Party", re.compile(r"^(?:3\.?\s*)?Notify\s*Part(?:y|ies)(?:\s*\(\s*1\s*\))?(?!\s*(?:2|\(\s*2\s*\)))", re.I)),
     (
         "Notify Party 2 / Also Notify",
-        re.compile(r"^(?:Also\s+Notify(?:\s+Party)?(?:\s*[-–]?\s*routing\s*&\s*Instructions)?|Notify\s+Part(?:y|ies)\s*(?:2|\(\s*2\s*\))|…?\s*CONTINUED\s+FROM\s+NOTIFY\s+PARTIES)", re.I),
+        re.compile(r"^(?:Also\s+Notify(?:\s*Party)?(?:\s*[-–]?\s*routing\s*&\s*Instructions)?|Notify\s+Part(?:y|ies)\s*(?:2|\(\s*2\s*\))|…?\s*CONTINUED\s+FROM\s+NOTIFY\s+PARTIES)", re.I),
     ),
     ("Booking No.", re.compile(r"^(?:Booking\s+Ref\.?|Booking\s+No\.?)\b", re.I)),
     ("Sea Waybill / B/L No.", re.compile(r"^(?:Sea\s+Waybill\s+No\.?|B/L\s+No\.?|Bill\s+of\s+Lading\s+No\.?|BILL\s+OF\s+LADING\s*\(AIR\s+WAYBILL\))", re.I)),
@@ -332,10 +338,7 @@ def _extract_single_page(
     page_width = float(rect.width or 600.0)
     page_height = float(rect.height or 800.0)
 
-    native_text = page.get_text(
-        "text",
-        sort=True,
-    ).strip()
+    native_text = _normalize_text(page.get_text("text", sort=True)).strip()
 
     # Check if page is pure carrier contract terms & conditions boilerplate (e.g. back of Sea Waybill)
     if _is_pure_terms_and_conditions_page(native_text):
@@ -352,7 +355,7 @@ def _extract_single_page(
     raw_words = page.get_text("words") or []
     words: list[WordBox] = []
     for rw in raw_words:
-        text_val = str(rw[4]).strip()
+        text_val = _normalize_text(str(rw[4])).strip()
         if not text_val:
             continue
         # Filter 2D barcode text strings (e.g. PDF417 digit streams >= 35 digits)
@@ -387,6 +390,19 @@ def _extract_single_page(
         len(words),
         total_chars,
     )
+    
+    needs_ocr = _needs_page_ocr(words, native_text)
+
+    logger.info(
+        "[DEBUG PDF ROUTE] page=%d native_chars=%d "
+        "words=%d word_chars=%d needs_ocr=%s",
+        page_num,
+        len(native_text),
+        len(words),
+        total_chars,
+        needs_ocr,
+    )
+    
     # 1. Check if page is Scanned / Image-only (or hybrid with missing text layer)
     if _needs_page_ocr(words, native_text):
         ocr_text = _extract_scanned_page_text(page, page_num, total_pages, file_path)
@@ -699,7 +715,16 @@ def _extract_bl_anchor_boxes(
 
         box_y1 = min(bottom_candidates)
         # Cap box height reasonably so a bottom label doesn't swallow the whole footer
-        if anc["label"].startswith(("1.", "2.", "3.", "Notify")):
+        _party_box_labels = (
+            "1. Shipper",
+            "2. Consignee",
+            "3. Notify Party",
+            "Notify Party 2 / Also Notify",
+            "Delivery To",
+            "Forwarding Agent",
+        )
+        is_party_box = anc["label"] in _party_box_labels or anc["label"].startswith(("1.", "2.", "3.", "Notify"))
+        if is_party_box:
             max_h = 95.0
         elif anc["label"].startswith(("Place and Date of Issue", "Date of Issue", "Place of Issue", "Date Laden on Board", "Request (Routing")):
             max_h = 78.0
@@ -733,16 +758,23 @@ def _extract_bl_anchor_boxes(
                 same_line_val,
                 flags=re.I,
             ).strip(" :.-*\t")
+            if is_party_box:
+                # On party boxes, header-line parentheticals (e.g. '(not to order)', '(No claim...)')
+                # and 'SAP CODE: ...' are form captions/metadata, never the party name.
+                same_line_val = re.sub(r"\(\s*[^)]*\s*\)", "", same_line_val).strip(" :.-*\t")
+                same_line_val = re.sub(r"\bSAP\s*CODE\b.*$", "", same_line_val, flags=re.I).strip(" :.-*\t")
             # Ignore sub-labels or connective headers like "(or) SHIPPER'S REF."
             if same_line_val and not re.search(r"\b(?:or|ref\.?|shipper'?s|freight|clause|combined\s+transport)\b", same_line_val, re.I):
                 inline_val = same_line_val
 
+        # For multi-line party boxes, strictly exclude words on the header bar itself (w.cy <= anc["y1"] + 1.5)
+        min_word_cy = (anc["y1"] + 1.5) if is_party_box else (anc["y1"] - 2.0)
         for w in words:
             if id(w) in anc["header_words"]:
                 continue
             if re.match(r"^[0-9]{35,}$", w.text) or re.match(r"^X{6,}$", w.text):
                 continue
-            if ax0 <= w.cx <= box_x1 and anc["y1"] - 2.0 <= w.cy <= box_y1:
+            if ax0 <= w.cx <= box_x1 and min_word_cy <= w.cy <= box_y1:
                 box_words.append(w)
 
         box_lines = _cluster_words_into_visual_lines(box_words, y_tolerance=3.0)
@@ -753,16 +785,26 @@ def _extract_bl_anchor_boxes(
             if not re.match(
                 r"^(?:Insert\s+Name\s+Address|It\s+is\s+agreed\s+that\s+no\s+responsibility|"
                 r"to\s+the\s+Carrier\s+or\s+his\s+agents|Subject\s+to\s+Clause\s+7|"
-                r"\(?\s*Combined\s+Transport\s+ONLY|\(?\s*see\s+Clause\s+\d)",
+                r"\(?\s*Combined\s+Transport\s+ONLY|\(?\s*see\s+Clause\s+\d|"
+                r"\(\s*not\s+to\s+order\s*\)|\(\s*No\s+claim\s+shall\s+attach|"
+                r"(?:\(\s*\d+\s*\)\s*)?SAP\s*CODE\b)",
                 ln,
                 re.I,
             )
         ]
-        # For single-value headers (B/L No., Booking No., Request No., Dates), prefer inline_val if available
+        if anc["label"] == "1. Shipper":
+            cleaned_lines = [
+                ln for ln in cleaned_lines
+                if not re.search(r"\b(?:INTER\s+COMPANY\s+AMOUNT|TOTAL\s+AMOUNT|INCOTERMS|B/L\s+ISSUED\s+AT)\b", ln, re.I)
+            ]
+        # For single-value headers (B/L No., Booking No., Request No., Dates) or Checklist 'SHIPPER: BIVN/BIL', prefer inline_val.
+        # For multi-line party boxes, only use inline_val if there are no body lines below the header.
         if inline_val:
             if anc["label"] in ("Sea Waybill / B/L No.", "Booking No.", "Request No. / Shipment No."):
                 cleaned_lines = [inline_val]
-            else:
+            elif anc["label"] == "1. Shipper" and re.match(r"^(?:BIVN|BIL)\b", inline_val.strip(), re.I):
+                cleaned_lines = [inline_val.strip()]
+            elif not is_party_box or not cleaned_lines:
                 cleaned_lines.insert(0, inline_val)
 
         final_val = "\n".join(cleaned_lines).strip()
@@ -787,7 +829,7 @@ def _extract_inline_value_from_header(canonical_label: str, raw_header: str) -> 
     """Extract inline values when label and value sit close together on the same line."""
     # Remove known boilerplate instructions inside header
     cleaned = re.sub(
-        r"Insert\s+Name\s+Address\s+and\s+Phone/Fax|\(\s*(?:Combined\s+Transport\s+ONLY|see\s+Clause)[^)]*\)",
+        r"Insert\s+Name\s+Address\s+and\s+Phone/Fax|\(\s*(?:Combined\s+Transport\s+ONLY|see\s+Clause|not\s+to\s+order|No\s+claim\s+shall\s+attach|if\s+['\"]?order['\"]?|complete\s+name)[^)]*\)|(?:\(\s*\d+\s*\)\s*)?\bSAP\s*CODE\b.*$",
         "",
         raw_header,
         flags=re.I,
@@ -991,7 +1033,7 @@ def _append_shipping_structured_summary(page_text: str, page_num: int) -> str:
             # 1.4 Type (include up to 120 chars before container number for Checklist 'STUFFING PLAN 40HC:... | FCL CONTAINER NO. ...')
             type_search_block = page_text[max(0, start - 120) : end]
             t_m = re.search(
-                r"((?:20|40|45)(?:\'|\s*ft)?\s*(?:gp|dc|hc|hq|rf|ot|fr|tk|std|high\s+cube)|40HC:40FT[^\n|]+)",
+                r"((?:20|40|45)(?:\'|\s*ft)?\s*(?:gp|dc|hc|hq|rf|ot|fr|tk|std|high\s*cube)|40HC:40FT[^\n|]+)",
                 type_search_block,
                 re.I,
             )
@@ -1442,7 +1484,7 @@ def _extract_scanned_page_text(
                 xs = [ float(pt[0]) for pt in box ]
                 ys = [ float(pt[1]) for pt in box ]
                 ocr_words.append(
-                    WordBox(min(xs), min(ys), max(xs), max(ys), str(text_val).strip())
+                    WordBox(min(xs), min(ys), max(xs), max(ys), _normalize_text(str(text_val)).strip())
                 )
             lines = _cluster_words_into_visual_lines(ocr_words, y_tolerance=6.0)
             text_out = "\n".join(vl.render(col_gap_pt=25.0) for vl in lines if vl.words)
@@ -1466,7 +1508,7 @@ def _extract_scanned_page_text(
         import pytesseract  # type: ignore[import]
 
         img = Image.open(io.BytesIO(png_bytes))
-        text_out = pytesseract.image_to_string(img)
+        text_out = _normalize_text(pytesseract.image_to_string(img))
         if text_out and len(text_out.strip()) >= 30:
             logger.info("Extracted scanned page %d of %s via pytesseract", page_num, file_path)
             return text_out.strip()

@@ -57,6 +57,14 @@ BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, H
 - `REQUEST NO.` ↔ `SHIPMENT / SHIPMENT NO.` (Hạng mục 21).
 - `NOTIFY PARTY 2` ↔ `ALSO NOTIFY PARTY` (Hạng mục 4).
 - **Số bill và invoice**: Kiểm tra số bill tại `BILL OF LADING (AIR WAYBILL)` khớp BL; tại trang `G-TOTAL` kiểm tra đủ toàn bộ invoice (dạng `824957-0 1` hiểu là `-0` và `-1`).
+- **Hạng mục 5 (`DELIVERY TO`)**:
+  + Lấy đúng DELIVERY TO trên Checklist, không lấy TO hoặc lẫn CONSIGNEE.
+  + Đối chiếu với DELIVERY TO hoặc trường BL tương ứng đã cấu hình;
+    ghi rõ trường nguồn, không tự gán trường tương đương.
+  + Giữ nguyên giá trị, nguồn và trạng thái do code trả về;
+    không lấy lại từ text thô hoặc dùng kết quả hạng mục 16.
+  + Chưa trích được hoặc chưa rõ ánh xạ → KHÔNG HIỂU;
+    xác nhận thực sự thiếu dữ liệu → KHÔNG TÌM THẤY.
 - **Hạng mục 8 (`CONTAINER TYPE`)**: Các cách ghi cùng loại container như `40HC`, `40HQ`, `40' HIGH CUBE`, `40HC:40FT 9FT 6IN DRY CONTAINER` là tương đương → **ĐÚNG** (đưa vào Bảng 1, trình bày gộp 1 dòng); nếu khác loại container kết luận **SAI** (đưa vào Bảng 2).
 - **Hạng mục 9 (`P'KGS`)**: Trình bày toàn bộ các container gộp trên **1 dòng duy nhất**. Cột `Dữ liệu BL Check List` ghi số kiện từng container và tổng PKGS; Cột `Dữ liệu BL` ghi số kiện từng container và tổng CARTONS. Hai bên khớp số kiện kết luận **ĐÚNG** (Bảng 1); nếu sai lệch số lượng hoặc một bên không có số kiện (0 PKGS/N/A) kết luận **SAI** (Bảng 2).
 - **Hạng mục 10 (`WEIGHT`)**: Trình bày toàn bộ các container gộp trên **1 dòng duy nhất**. Cột `Dữ liệu BL Check List` ghi trọng lượng từng container (KGS); Cột `Dữ liệu BL` ghi trọng lượng từng container (KGS). Hai bên khớp nhau kết luận **ĐÚNG** (Bảng 1); nếu sai lệch số liệu hoặc một bên thiếu dữ liệu (N/A) kết luận **SAI** (Bảng 2).
@@ -77,7 +85,18 @@ BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, H
   "SDD" là loại giao hàng, KHÔNG phải số seal.
   Đối chiếu với Delivery term trên BL (CY-CY, CY-DOOR, CFS-CFS, CFS-DOOR).
   Khớp → ĐÚNG (Bảng 1); khác → SAI (Bảng 2).
-- **Hạng mục 22 (`B/L REQUIRED`)**: Trên BL, có `SHIPPED ON BOARD DATE + ngày` nghĩa là `ON BOARD`; có `RECEIVED DATE + ngày` nghĩa là `RECEIVED` (có đồng thời cả hai là **SAI**). Đối chiếu với `B/L REQUIRED` trên Check List; nếu khớp thì kết luận **ĐÚNG** (Bảng 1); không khớp hoặc mâu thuẫn kết luận **SAI** (Bảng 2).
+- **Hạng mục 22 (`B/L REQUIRED`)**:
+  + Không yêu cầu BL phải có nhãn `B/L REQUIRED`.
+  + `ON BOARD` trên Check List được xác nhận nếu BL có một trong các bằng chứng:
+    `SHIPPED ON BOARD`, `SHIPPED ON BOARD DATE`, `LADEN ON BOARD`,
+    `LADEN ON BOARD DATE` hoặc `ON BOARD DATE`.
+  + Cho phép OCR làm mất/dính khoảng trắng trong các nhãn trên.
+  + `RECEIVED` trên Check List được xác nhận bằng `RECEIVED DATE`
+    hoặc `RECEIVED FOR SHIPMENT`.
+  + Nếu BL có đồng thời bằng chứng ON BOARD và RECEIVED thì kết luận SAI.
+  + Nếu bằng chứng trên BL khớp yêu cầu của Check List thì kết luận ĐÚNG.
+  + Chỉ kết luận KHÔNG TÌM THẤY khi toàn bộ BL không có bất kỳ bằng chứng
+    ON BOARD hoặc RECEIVED tương ứng nào.
 - **Hạng mục 23 (`HS code`)**: BL không được hiển thị HS code (cả hai không có hoặc chỉ Check List không yêu cầu hiển thị trên BL → kiểm tra theo thực tế tài liệu; nếu BL hiển thị HS code là **SAI**).
 
 - **Hạng mục 6 (`CONTAINER NO.`)**: Lấy danh sách số container (dạng 4 chữ cái + 7 chữ số như `TXGU7489205`, `EGSU9442843`...) từ dòng `STUFFING PLAN` trên Check List và ô Container trên BL. Tuyệt đối không lấy chuỗi loại container (`40HC:40FT...`) điền vào ô Container No.
@@ -669,11 +688,49 @@ def reconcile_compare_counts(md: str) -> str:
     """Reconcile table summary counts and ensure strict separation between Table 1 and Table 2."""
     if not md:
         return md
+    
+    def log_item_coverage(stage: str, content: str) -> None:
+        item_ids = [
+            int(match.group(1))
+            for match in re.finditer(
+                r"^[ \t]*\|[ \t]*(?:\*\*)?"
+                r"([0-9]{1,2})(?:\*\*)?[ \t]*\|",
+                content,
+                flags=re.MULTILINE,
+            )
+        ]
 
+        missing = sorted(set(range(1, 24)) - set(item_ids))
+        duplicated = sorted({
+            item_id
+            for item_id in item_ids
+            if item_ids.count(item_id) > 1
+        })
+
+        logger.info(
+            "[DEBUG COMPARE COVERAGE] module=%s stage=%s "
+            "rows=%d missing=%s duplicated=%s item14_present=%s",
+            __name__,
+            stage,
+            len(item_ids),
+            missing,
+            duplicated,
+            14 in item_ids,
+        )
+
+    log_item_coverage("before_reconcile", md)
+    
     t1_match = re.search(r"(##\s*1\.\s*T[^\n]*\n+)(\|.*?\n\|[-:\s|]+\n)(.*?)(\n+\*\*T[^\n]*?\n|(?=##\s*2|\Z))", md, re.DOTALL | re.I)
     t2_match = re.search(r"(##\s*2\.\s*[^|\n]*\n+)(\|.*?\n\|[-:\s|]+\n)(.*?)(\n+\*\*T[^\n]*?\n|\Z)", md, re.DOTALL | re.I)
 
     if not t1_match or not t2_match:
+        logger.warning(
+            "[DEBUG COMPARE RECONCILE] module=%s "
+            "table_parse_failed table1=%s table2=%s",
+            __name__,
+            bool(t1_match),
+            bool(t2_match),
+        )
         return md
 
     t1_head, t1_cols, t1_body, t1_foot = t1_match.groups()
@@ -743,4 +800,21 @@ def reconcile_compare_counts(md: str) -> str:
     prefix = md[:t1_match.start(1)]
     middle = md[t1_match.end(0):t2_match.start(1)]
     suffix = md[t2_match.end(0):]
-    return f"{prefix}{new_t1}{middle}{new_t2}{suffix}"
+    result = f"{prefix}{new_t1}{middle}{new_t2}{suffix}"
+    log_item_coverage("after_reconcile", result)
+    pol_lines = [
+            line
+            for line in md.splitlines()
+            if re.search(
+                r"\bPORT\s+OF\s+LOADING\b",
+                line,
+                flags=re.IGNORECASE,
+            )
+        ]
+    
+    logger.info(
+            "[DEBUG PORT OF LOADING OUTPUT] found=%s lines=%r",
+            bool(pol_lines),
+            pol_lines,
+        )
+    return result
