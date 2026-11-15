@@ -22,14 +22,14 @@ from __future__ import annotations
 
 import base64
 from collections import Counter
+import ctypes
 from dataclasses import dataclass, field
+import gc
 import logging
 import os
 import re
 import threading
 from typing import Any, Generator, Optional
-import re
-import threading
 import unicodedata
 
 import httpx
@@ -39,9 +39,11 @@ logger = logging.getLogger(__name__)
 _RAPIDOCR_ENGINE: Any = None
 _RAPIDOCR_LOCK = threading.Lock()
 
+
 def _normalize_text(text: str) -> str:
     """Chuẩn hóa ký tự full-width/compatibility (ví dụ '，' → ',', '（' → '(')."""
     return unicodedata.normalize("NFKC", text or "")
+
 
 def _get_rapidocr_engine() -> Any:
     """Reuse one local OCR engine per process; caller holds the OCR lock."""
@@ -50,6 +52,28 @@ def _get_rapidocr_engine() -> Any:
         from rapidocr_onnxruntime import RapidOCR
         _RAPIDOCR_ENGINE = RapidOCR()
     return _RAPIDOCR_ENGINE
+
+
+def _release_ocr_memory() -> None:
+    """Release cached RapidOCR models, PyMuPDF caches, and glibc heap arenas."""
+    global _RAPIDOCR_ENGINE
+    with _RAPIDOCR_LOCK:
+        _RAPIDOCR_ENGINE = None
+
+    try:
+        import fitz  # PyMuPDF
+
+        fitz.TOOLS.store_shrink(100)
+    except Exception:
+        pass
+
+    gc.collect()
+
+    if os.name != "nt":
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
 
 
 def _needs_page_ocr(words: list[WordBox], native_text: str) -> bool:
@@ -319,6 +343,7 @@ def parse_pdf_document(file_path: str) -> Generator[str, None, None]:
                 yield page_text.strip()
     finally:
         doc.close()
+        _release_ocr_memory()
 
 
 # ---------------------------------------------------------------------------
@@ -1466,69 +1491,77 @@ def _extract_scanned_page_text(
     file_path: str,
 ) -> str:
     """Extract text from a scanned/image PDF page via RapidOCR, Tesseract, or Ollama Vision."""
+    png_bytes: Optional[bytes] = None
     try:
-        pix = page.get_pixmap(dpi=200, alpha=False)
-        png_bytes = pix.tobytes("png")
+        pix = page.get_pixmap(dpi=150, alpha=False)
+        try:
+            png_bytes = pix.tobytes("png")
+        finally:
+            del pix
     except Exception as e:
         logger.warning("Failed to render PDF page %d to image for OCR: %s", page_num, str(e))
         return ""
 
-    # 1. Try RapidOCR if installed
     try:
-        with _RAPIDOCR_LOCK:
-            ocr_engine = _get_rapidocr_engine()
-            result, _ = ocr_engine(png_bytes)
-        if result:
-            ocr_words: list[WordBox] = []
-            for box, text_val, _score in result:
-                xs = [ float(pt[0]) for pt in box ]
-                ys = [ float(pt[1]) for pt in box ]
-                ocr_words.append(
-                    WordBox(min(xs), min(ys), max(xs), max(ys), _normalize_text(str(text_val)).strip())
-                )
-            lines = _cluster_words_into_visual_lines(ocr_words, y_tolerance=6.0)
-            text_out = "\n".join(vl.render(col_gap_pt=25.0) for vl in lines if vl.words)
-            if len(text_out.strip()) >= 30:
-                logger.info("Extracted scanned page %d of %s via RapidOCR", page_num, file_path)
-                return text_out
-    except ImportError:
-        logger.info("RapidOCR is not installed.")
-        pass
-    except Exception as e:
-        logger.warning(
-            "RapidOCR failed on page %d: %s",
-            page_num,
-            str(e),
-        )
+        # 1. Try RapidOCR if installed
+        try:
+            with _RAPIDOCR_LOCK:
+                ocr_engine = _get_rapidocr_engine()
+                result, _ = ocr_engine(png_bytes)
+            if result:
+                ocr_words: list[WordBox] = []
+                for box, text_val, _score in result:
+                    xs = [ float(pt[0]) for pt in box ]
+                    ys = [ float(pt[1]) for pt in box ]
+                    ocr_words.append(
+                        WordBox(min(xs), min(ys), max(xs), max(ys), _normalize_text(str(text_val)).strip())
+                    )
+                lines = _cluster_words_into_visual_lines(ocr_words, y_tolerance=6.0)
+                text_out = "\n".join(vl.render(col_gap_pt=25.0) for vl in lines if vl.words)
+                if len(text_out.strip()) >= 30:
+                    logger.info("Extracted scanned page %d of %s via RapidOCR", page_num, file_path)
+                    return text_out
+        except ImportError:
+            logger.info("RapidOCR is not installed.")
+            pass
+        except Exception as e:
+            logger.warning(
+                "RapidOCR failed on page %d: %s",
+                page_num,
+                str(e),
+            )
 
-    # 2. Try pytesseract if installed
-    try:
-        import io
-        from PIL import Image  # type: ignore[import]
-        import pytesseract  # type: ignore[import]
+        # 2. Try pytesseract if installed
+        try:
+            import io
+            from PIL import Image  # type: ignore[import]
+            import pytesseract  # type: ignore[import]
 
-        img = Image.open(io.BytesIO(png_bytes))
-        text_out = _normalize_text(pytesseract.image_to_string(img))
-        if text_out and len(text_out.strip()) >= 30:
-            logger.info("Extracted scanned page %d of %s via pytesseract", page_num, file_path)
-            return text_out.strip()
-    except ImportError:
-        logger.info("pytesseract or Pillow is not installed.")
-        pass
-    except Exception as e:
-        logger.warning(
-            "Tesseract failed on page %d: %s",
-            page_num,
-            str(e),
-        )
+            img = Image.open(io.BytesIO(png_bytes))
+            text_out = _normalize_text(pytesseract.image_to_string(img))
+            if text_out and len(text_out.strip()) >= 30:
+                logger.info("Extracted scanned page %d of %s via pytesseract", page_num, file_path)
+                return text_out.strip()
+        except ImportError:
+            logger.info("pytesseract or Pillow is not installed.")
+            pass
+        except Exception as e:
+            logger.warning(
+                "Tesseract failed on page %d: %s",
+                page_num,
+                str(e),
+            )
 
-    # 3. Fallback to the configured Ollama Vision model
-    vision_text = _ollama_vision_transcribe_page(png_bytes, page_num)
-    if vision_text:
-        logger.info("Extracted scanned page %d of %s via Ollama Vision", page_num, file_path)
-        return vision_text
+        # 3. Fallback to the configured Ollama Vision model
+        vision_text = _ollama_vision_transcribe_page(png_bytes, page_num)
+        if vision_text:
+            logger.info("Extracted scanned page %d of %s via Ollama Vision", page_num, file_path)
+            return vision_text
 
-    return ""
+        return ""
+    finally:
+        png_bytes = None
+        gc.collect()
 
 
 def _ollama_vision_transcribe_page(
@@ -1582,6 +1615,7 @@ def _ollama_vision_transcribe_page(
                 json={
                     "model": model,
                     "stream": False,
+                    "think": False,
                     "messages": [
                         {
                             "role": "user",
@@ -1592,6 +1626,7 @@ def _ollama_vision_transcribe_page(
                     "options": {
                         "temperature": 0.0,
                         "num_predict": 4096,
+                        "num_ctx": 4096,
                     },
                 },
             )
