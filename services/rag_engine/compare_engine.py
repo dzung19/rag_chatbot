@@ -256,7 +256,7 @@ _MONTH_MAP: dict[str, int] = {
 }
 
 _DATE_TOKEN_RE = re.compile(
-    r"\b(\d{1,2}[-\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*[-\s]+\d{4}|\d{4}[./-]\d{2}[./-]\d{2})\b",
+    r"\b(\d{1,2}[-\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*[-\s]+(?:\d{4}|\d{2}(?!\d))|\d{4}[./-]\d{1,2}[./-]\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{4})\b",
     re.I,
 )
 
@@ -270,11 +270,21 @@ def normalize_shipping_date(raw_date: str) -> Optional[str]:
     if m_ymd:
         return f"{int(m_ymd.group(1)):04d}-{int(m_ymd.group(2)):02d}-{int(m_ymd.group(3)):02d}"
 
-    m_dmy = re.match(r"^(\d{1,2})[-\s]+([A-Za-z]+)[-\s]+(\d{4})$", s)
+    m_dmy_num = re.match(r"^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$", s)
+    if m_dmy_num:
+        d, m, y = int(m_dmy_num.group(1)), int(m_dmy_num.group(2)), int(m_dmy_num.group(3))
+        if m > 12 >= d:
+            d, m = m, d
+        if 1 <= m <= 12 and 1 <= d <= 31:
+            return f"{y:04d}-{m:02d}-{d:02d}"
+
+    m_dmy = re.match(r"^(\d{1,2})[-\s]+([A-Za-z]+)[-\s]+(\d{2}|\d{4})$", s)
     if m_dmy:
         day = int(m_dmy.group(1))
         mon_str = m_dmy.group(2).upper()
         year = int(m_dmy.group(3))
+        if year < 100:
+            year += 2000
         mon = _MONTH_MAP.get(mon_str) or _MONTH_MAP.get(mon_str[:3])
         if mon:
             return f"{year:04d}-{mon:02d}-{day:02d}"
@@ -828,6 +838,17 @@ def extract_consignee_comparison(
                     "FORWARDINGAGENT",
                 )):
                     continue
+                # Skip OCR-merged carrier clause lines from adjacent right-hand column
+                if re.search(r"[A-Za-z]{20,}", left_col):
+                    continue
+                if re.search(
+                    r"(?:CLAUSE|MERCHANT|STIPULATION|JURISDIC|LIABILIT|ARTICLE|STANDVOID|ORIGNAL|SURRENDER|WEBSITE|HTTPS?://|TERMSCON|CARRIERFORCARRIAGE)",
+                    left_col,
+                    re.I,
+                ):
+                    continue
+                if re.match(r"^(?=.*[a-z])[A-Za-z]{10,}$", left_col):
+                    continue
                 lines_out.append(left_col)
             value = " ".join(lines_out)
         else:
@@ -881,7 +902,7 @@ def extract_consignee_comparison(
             r"^[ \t]*(?:2\.?[ \t]*)?CONSIGNEE\b[^\n]*\n"
             r"(.*?)"
             r"(?=^[ \t]*(?:"
-            r"(?:3\.?[ \t]*)?NOTIFY[ \t]*PART(?:Y|IES)\b"
+            r"(?:3\.?[ \t]*)?NOTI[TFV]Y[ \t]*PART(?:Y|IES)\b"
             r"|FIRST[ \t]*NOTIFY\b"
             r"|ALSO[ \t]*NOTIFY\b"
             r"|DELIVERY[ \t]*TO\b"
@@ -889,13 +910,34 @@ def extract_consignee_comparison(
             r"|(?:5\.?[ \t]*)?PLACE[ \t]*OF[ \t]*RECEIPT\b"
             r"|(?:6\.?[ \t]*)?(?:OCEAN[ \t]*)?VESSEL\b"
             r"|(?:7\.?[ \t]*)?PORT[ \t]*OF[ \t]*LOADING\b"
-            r"|===|###"
+            r"|===|###|\*"
             r")|\Z)",
             bl_text or "",
             flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
         )
         if bl_raw_match:
             bl_value = clean_value(bl_raw_match.group(1), is_raw_multiline=True)
+
+    # 2b. Resolve '*' overflow/footnote continuation (e.g. 'TEL:... *' continued on attachment as '*EORI NO. ...')
+    if bl_value and bl_value.rstrip().endswith("*"):
+        for m_star in re.finditer(
+            r"^[ \t]*\*([A-Z0-9][^\r\n]*(?:\r?\n[^\r\n]+){0,3})",
+            bl_text or "",
+            flags=re.MULTILINE,
+        ):
+            block = m_star.group(1)
+            if re.search(r"As\s+Agent|Amended\s+as\s+per|Combined\s+Transport", block, re.I):
+                continue
+            cont_lines: list[str] = []
+            for ln in block.splitlines():
+                s = ln.split("|", 1)[0].strip()
+                if not s or re.match(r"^(?:TOTAL\s*:|PART\s+OF\b|SHIPPER'?S|CONTAINER|===|###)", s, re.I):
+                    break
+                cont_lines.append(s)
+            cont_str = clean_value(" ".join(cont_lines))
+            if cont_str and re.search(r"\b(?:EORI|CVR|VAT|TAX|TRN|ATTN|TEL|FAX)\b", cont_str, re.I):
+                bl_value = f"{bl_value.rstrip(' *')} {cont_str}".strip()
+                break
 
     if not cl_value or not bl_value:
         status = "KHÔNG HIỂU"
@@ -1088,7 +1130,7 @@ def extract_delivery_to_comparison(
             r"|VESSEL\b|OCEAN[ \t]+VESSEL\b"
             r"|AS[ \t]+(?:THE[ \t]+)?CARRIER\b"
             r"|\d[\d,.]*[ \t]+\d[\d,.]*$"
-            r"|===|###"
+            r"|===|###|\*"
             r")",
             re.IGNORECASE,
         )
@@ -1448,7 +1490,7 @@ def _extract_bl_notify_parties(
                 r"|[\"“']?ANY[ \t]+DISPUTE\b"
                 r"|PORT[ \t]+OF[ \t]+DISCHARGE\b"
                 r"|NOTIFY[ \t]*PART(?:Y|IES)\b"
-                r"|===|###"
+                r"|===|###|\*"
                 r")",
                 value,
                 flags=re.IGNORECASE,
@@ -1470,7 +1512,7 @@ def _extract_bl_notify_parties(
     party1_pattern = re.compile(
         r"^[ \t]*(?:"
         r"FIRST[ \t]*NOTIFY(?:[ \t]*PARTY)?"
-        r"|NOTIFY[ \t]*PART(?:Y|IES)"
+        r"|NOTI[TFV]Y[ \t]*PART(?:Y|IES)"
         r"(?:[ \t]*\([ \t]*1[ \t]*\))?"
         r")"
         r"(?![ \t]*(?:2\b|\([ \t]*2[ \t]*\)))"
@@ -1880,7 +1922,7 @@ def extract_port_of_loading_comparison(
     def extract_values(text: str, label: str) -> list[str]:
         text = prepare(text)
 
-        label_re = r"[ \t]+".join(
+        label_re = r"[ \t]*".join(
             re.escape(word) for word in label.split()
         )
 
@@ -1943,6 +1985,12 @@ def extract_port_of_loading_comparison(
 
                 # Stop at the next label row, e.g. "VIA   ETA".
                 if any(field_start.match(cell) for cell in value_cells):
+                    break
+
+                if "|" in line and "|" in next_row:
+                    if len(value_cells) <= max(target_columns):
+                        continue
+                    matched_row = value_cells
                     break
 
                 if len(value_cells) != len(header_cells):
@@ -2044,7 +2092,13 @@ def extract_port_of_loading_comparison(
             "để thay thế ô FROM."
         )
 
-    elif normalize(checklist_value) == normalize(bl_value):
+    elif (
+        normalize(checklist_value) == normalize(bl_value)
+        or (
+            ("," in checklist_value) != ("," in bl_value)
+            and normalize(checklist_value.split(",")[0]) == normalize(bl_value.split(",")[0])
+        )
+    ):
         status = "ĐÚNG"
         detail = (
             "Ô FROM trên Checklist khớp PORT OF LOADING trên BL "
@@ -2075,6 +2129,172 @@ def extract_port_of_loading_comparison(
 
     return result
 
+_BILL_NO_STOPWORDS = {
+    "WAYBILL", "LADING", "NUMBER", "STANDARD", "COMBINED", "UNIFORM",
+    "ORIGINAL", "COLLECT", "PREPAID", "FREIGHT", "INVOICE", "SHIPMENT",
+    "CARRIER", "EVERGREEN", "REQUEST", "REQUIRED", "ONBOARD", "SEAWAYBILL",
+}
+
+
+def _extract_clean_bill_token(raw: str) -> str:
+    """Extract a clean Bill of Lading / Sea Waybill number token from a noisy row/field."""
+    if not raw:
+        return ""
+    cleaned = re.sub(
+        r"\b(?:FREIGHT|INVOICE\s+NO\.?|PAGE|COLLECT|PREPAID|USD|EUR|JPY)\b.*$",
+        "",
+        raw,
+        flags=re.I,
+    ).strip(" |:\t")
+    for m in re.finditer(r"\b([A-Z]{2,}[A-Z0-9_-]{4,}|[0-9]{6,}[A-Z0-9_-]*)\b", cleaned, re.I):
+        tok = m.group(1).upper()
+        if tok not in _BILL_NO_STOPWORDS:
+            return tok
+    return ""
+
+
+def extract_bill_no_comparison(checklist_text: str, bl_text: str) -> dict:
+    """Extract and compare Bill of Lading / Sea Waybill numbers between Check List and BL."""
+    cl_bill = ""
+    bl_bill = ""
+
+    # 1. Check List: Form Boxes first, then BILL OF LADING(AIR WAYBILL) / B/L No. patterns
+    for m in re.finditer(r"-\s*\*\*Sea Waybill / B/L No\.\*\*:\s*(.+)", checklist_text, re.I):
+        tok = _extract_clean_bill_token(m.group(1))
+        if tok:
+            cl_bill = tok
+            break
+    if not cl_bill:
+        for pat in (
+            r"BILL\s+OF\s+LADING\s*\(?\s*AIR\s+WAYBILL\s*\)?\s*:?\s*(?:\|\s*INVOICE\s+NO\.?(?:\s*\|\s*FREIGHT\s*:?)?\s*)?(?:\r?\n\s*)?([^\r\n]+)",
+            r"\b(?:B/L|BILL\s+OF\s+LADING)\s*(?:NO\.?|NUMBER)\s*:?\s*\|?\s*([^\r\n]+)",
+        ):
+            for m in re.finditer(pat, checklist_text, re.I):
+                tok = _extract_clean_bill_token(m.group(1))
+                if tok:
+                    cl_bill = tok
+                    break
+            if cl_bill:
+                break
+
+    # 2. BL / Sea Waybill: Form Boxes first, then SEA WAYBILL / B/L NUMBER patterns
+    for m in re.finditer(r"-\s*\*\*Sea Waybill / B/L No\.\*\*:\s*(.+)", bl_text, re.I):
+        tok = _extract_clean_bill_token(m.group(1))
+        if tok:
+            bl_bill = tok
+            break
+    if not bl_bill:
+        for pat in (
+            r"\bSEA\s*WAYBILL\s*(?:NO\.?\s*:?)?\s*[-:|]\s*([^\r\n]+)",
+            r"\bSEA\s*WAYBILL\s+(?:NO\.?\s*:?\s*)?([A-Z0-9_-]{6,})",
+            r"\b(?:TO\s+)?(?:B/L|BILL\s+OF\s+LADING)\s*(?:NO\.?|NUMBER)\s*:?\s*\|?\s*([^\r\n]+)",
+        ):
+            for m in re.finditer(pat, bl_text, re.I):
+                tok = _extract_clean_bill_token(m.group(1))
+                if tok:
+                    bl_bill = tok
+                    break
+            if bl_bill:
+                break
+
+    cl_norm = re.sub(r"[^A-Z0-9]", "", cl_bill.upper())
+    bl_norm = re.sub(r"[^A-Z0-9]", "", bl_bill.upper())
+
+    if cl_norm and bl_norm:
+        verdict = "ĐÚNG" if cl_norm == bl_norm else "SAI"
+    elif cl_norm or bl_norm:
+        verdict = "KHÔNG TÌM THẤY"
+    else:
+        verdict = ""
+
+    return {
+        "checklist_bill": cl_bill,
+        "bl_bill": bl_bill,
+        "verdict": verdict,
+    }
+
+
+def _expand_gtotal_invoice_tokens(raw_inv: str) -> list[str]:
+    """Expand shorthand G-TOTAL invoice lists like '818957-0 1 2' into ['818957-0', '818957-1', '818957-2']."""
+    if not raw_inv:
+        return []
+    cleaned = re.sub(r"\b(?:USD|EUR|JPY|FREIGHT|COLLECT|PREPAID|PAGE)\b.*$", "", raw_inv, flags=re.I).strip(" |:\t")
+    tokens = [t.strip(",;") for t in re.split(r"[\s,|]+", cleaned) if t.strip(",;")]
+    expanded: list[str] = []
+    current_prefix = ""
+    for tok in tokens:
+        m_full = re.match(r"^([A-Z0-9]+)-([A-Z0-9]+)$", tok, re.I)
+        if m_full:
+            current_prefix = m_full.group(1).upper()
+            val = f"{current_prefix}-{m_full.group(2).upper()}"
+            if val not in expanded:
+                expanded.append(val)
+        elif current_prefix and re.match(r"^[0-9]{1,2}$", tok):
+            val = f"{current_prefix}-{tok}"
+            if val not in expanded:
+                expanded.append(val)
+        elif re.match(r"^[A-Z0-9]{5,}$", tok, re.I):
+            val = tok.upper()
+            if val not in expanded:
+                expanded.append(val)
+    return expanded
+
+
+def extract_invoice_comparison(checklist_text: str, bl_text: str = "") -> dict:
+    """Extract Check List detail invoices and compare against G-TOTAL invoice list."""
+    detail_invoices: list[str] = []
+    for m in re.finditer(r"INVOICE\s*NO\.?\s*\([^)]*\)\s*([A-Z0-9]+-[A-Z0-9]+)", checklist_text, re.I):
+        inv = m.group(1).upper()
+        if inv not in detail_invoices:
+            detail_invoices.append(inv)
+    if not detail_invoices:
+        for m in re.finditer(r"\[DANH SÁCH INVOICE NO\. TRÊN TRANG \d+\]\*\*:\s*([^\r\n]+)", checklist_text, re.I):
+            for part in _expand_gtotal_invoice_tokens(m.group(1)):
+                if part not in detail_invoices:
+                    detail_invoices.append(part)
+
+    gtotal_raw = ""
+    gtotal_invoices: list[str] = []
+    m_gt = re.search(
+        r"G-TOTAL[\s\S]{0,400}?BILL\s+OF\s+LADING\s*\(?\s*AIR\s+WAYBILL\s*\)?\s*:?\s*\|\s*INVOICE\s+NO\.?(?:\s*\|\s*FREIGHT\s*:?)?\s*\r?\n([^\r\n]+)",
+        checklist_text,
+        re.I,
+    )
+    if m_gt:
+        row = m_gt.group(1)
+        cols = [c.strip() for c in row.split("|")]
+        if len(cols) >= 2:
+            gtotal_raw = cols[1]
+        else:
+            gtotal_raw = row
+        gtotal_invoices = _expand_gtotal_invoice_tokens(gtotal_raw)
+    else:
+        m_gt2 = re.search(r"G-TOTAL[\s\S]{0,300}?(?:\*\*Sea Waybill / B/L No\.\*\*:\s*[A-Z0-9-]+\s+([^\r\n]+))", checklist_text, re.I)
+        if m_gt2:
+            gtotal_raw = m_gt2.group(1).strip()
+            gtotal_invoices = _expand_gtotal_invoice_tokens(gtotal_raw)
+
+    if detail_invoices and gtotal_invoices:
+        missing = [inv for inv in detail_invoices if inv not in gtotal_invoices]
+        extra = [inv for inv in gtotal_invoices if inv not in detail_invoices]
+        verdict = "ĐÚNG" if (not missing and not extra) else "SAI"
+    elif detail_invoices or gtotal_invoices:
+        missing = [inv for inv in detail_invoices if inv not in gtotal_invoices]
+        extra = [inv for inv in gtotal_invoices if inv not in detail_invoices]
+        verdict = "KHÔNG TÌM THẤY"
+    else:
+        missing, extra, verdict = [], [], ""
+
+    return {
+        "detail_invoices": detail_invoices,
+        "gtotal_raw": gtotal_raw,
+        "gtotal_invoices": gtotal_invoices,
+        "missing": missing,
+        "extra": extra,
+        "verdict": verdict,
+    }
+
+
 def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> str:
     """Build a compact, high-signal pre-reconciled reference note for the 23-item comparison.
 
@@ -2091,7 +2311,11 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
         )
         # Add only business-approved equivalent BL field labels here.
     
-    delivery_to_equivalent_fields: tuple[str, ...] = ()
+    delivery_to_equivalent_fields: tuple[str, ...] = (
+        "NOTIFY PARTY(2)/DELIVERY TO",
+        "NOTIFY PARTY (2) / DELIVERY TO",
+        "NOTIFY PARTY 2 / DELIVERY TO",
+    )
 
     deliv_res = extract_delivery_to_comparison(
         checklist_text,
@@ -2369,15 +2593,22 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
                 bl_podeliv = cols[-1]
 
     if not bl_podeliv:
-        m_podeliv_tbl = re.search(
-            r"(?:Place\s*of\s*Delivery|PlaceofDelivery)[^\n]*\n[^\n]*?\|\s*([A-Z\s,]+?)(?:\s*\|\s*DOOR|\s*\|\s*CY|\s*$)",
+        for m_podeliv_hdr in re.finditer(
+            r"^([^\n]*\bPlace\s*of\s*Delivery\b[^\n]*)\n([^\n]+)",
             bl_text,
-            re.I,
-        )
-        if m_podeliv_tbl:
-            cand = m_podeliv_tbl.group(1).strip()
-            if not re.search(r"TRỐNG|N/A|^X{4,}$", cand, re.I):
-                bl_podeliv = cand
+            re.I | re.MULTILINE,
+        ):
+            hdr_cols = [c.strip() for c in m_podeliv_hdr.group(1).split("|")]
+            val_cols = [c.strip() for c in m_podeliv_hdr.group(2).split("|")]
+            target_idx = next(
+                (i for i, c in enumerate(hdr_cols) if re.search(r"^Place\s*of\s*Delivery\b", c, re.I)),
+                -1,
+            )
+            if 0 <= target_idx < len(val_cols):
+                cand = re.sub(r"\s+(?:CY|DOOR|CFS|SDD)\s*$", "", val_cols[target_idx], flags=re.I).strip(" :.-*\t")
+                if cand and not re.search(r"TRỐNG|N/A|^X{4,}$", cand, re.I):
+                    bl_podeliv = cand
+                    break
 
     if cl_to:
         if not bl_podeliv:
@@ -2465,6 +2696,21 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
                 bl_issue_place = _dedup_place(_DATE_TOKEN_RE.sub("", joined_left).replace("|", " "))
                 break
 
+    if not bl_issue_date:
+        m_pbi = re.search(
+            r"P[il]ace\s+of\s+Bill\(?s\)?\s*Issued\s*\|\s*Dated[^\n]*\n([^\n]+)",
+            bl_text,
+            re.I,
+        )
+        if m_pbi:
+            cols = [c.strip() for c in m_pbi.group(1).split("|") if c.strip()]
+            if cols:
+                found_d = _DATE_TOKEN_RE.findall(cols[-1])
+                if found_d:
+                    bl_issue_date = found_d[-1].strip()
+                    if len(cols) >= 2:
+                        bl_issue_place = _dedup_place(cols[-2])
+
     bl_issue_iso = normalize_shipping_date(bl_issue_date)
 
     bl_onboard_date = ""
@@ -2475,7 +2721,7 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
             bl_onboard_date = ob_d[0].strip()
     if not bl_onboard_date:
         for m_ob in re.finditer(
-            r"(?:SHIPPED\s+ON\s+BOARD\s+DATE|Date\s+Laden\s+on\s+Board)[^\n]*\n((?:[^\n]+\n?){1,3})",
+            r"(?:SHIPPED\s+ON\s+BOARD(?:\s+DATE)?|Date\s+Laden\s+on\s+Board|Laden\s*on\s*Board(?:\s*Vessel)?)[^\n]*\n((?:[^\n]+\n?){1,4})",
             bl_text,
             re.I,
         ):
@@ -2494,6 +2740,13 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
             if ob_d:
                 bl_onboard_date = ob_d[-1].strip()
                 break
+
+    if not bl_onboard_date and re.search(r"\bSHIPPED\s+ON\s+BOARD\b", bl_text, re.I):
+        m_from_req = re.search(r"\*\*From\s*\(Request\)\*\*:\s*([^\n]+)", bl_text, re.I)
+        if m_from_req:
+            ob_d = _DATE_TOKEN_RE.findall(m_from_req.group(1))
+            if ob_d:
+                bl_onboard_date = ob_d[0].strip()
 
     bl_onboard_iso = normalize_shipping_date(bl_onboard_date)
 
@@ -2537,20 +2790,53 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
         if rec_d:
             bl_rec_date = rec_d[0].strip()
 
-    if cl_bl_req and (bl_onboard_date or bl_rec_date):
-        if bl_onboard_date and bl_rec_date:
-            bl_req_val = f"Có cả ON BOARD ({bl_onboard_date}) và RECEIVED DATE ({bl_rec_date})"
+    has_onboard_evidence = bool(bl_onboard_date) or bool(
+        re.search(r"\b(?:Laden\s*on\s*Board|Shipped\s*on\s*Board|On\s*Board\s*Date)", bl_text, re.I)
+    )
+    has_received_evidence = bool(bl_rec_date) or bool(
+        re.search(r"\b(?:Received\s+for\s+Shipment|Received\s+Date)\b", bl_text, re.I)
+    )
+
+    if cl_bl_req and (has_onboard_evidence or has_received_evidence):
+        if has_onboard_evidence and has_received_evidence:
+            bl_req_val = f"Có cả ON BOARD ({bl_onboard_date or 'Laden on Board'}) và RECEIVED ({bl_rec_date or 'Received for Shipment'})"
             verdict_22 = "**SAI** (Bảng 2)"
-        elif bl_onboard_date:
-            bl_req_val = f"ON BOARD (SHIPPED ON BOARD DATE: {bl_onboard_date})"
+        elif has_onboard_evidence:
+            bl_req_val = f"ON BOARD (SHIPPED ON BOARD DATE: {bl_onboard_date})" if bl_onboard_date else "ON BOARD (Laden on Board)"
             verdict_22 = "**ĐÚNG** (Bảng 1)" if "ON BOARD" in cl_bl_req else "**SAI** (Bảng 2)"
         else:
-            bl_req_val = f"RECEIVED (RECEIVED DATE: {bl_rec_date})"
+            bl_req_val = f"RECEIVED (RECEIVED DATE: {bl_rec_date})" if bl_rec_date else "RECEIVED FOR SHIPMENT"
             verdict_22 = "**ĐÚNG** (Bảng 1)" if "RECEIVED" in cl_bl_req else "**SAI** (Bảng 2)"
 
         lines.append(
             f"- Hạng mục 22 (`B/L REQUIRED` - Bước 3): Cột `Dữ liệu BL Check List` = `{cl_bl_req}` | "
             f"Cột `Dữ liệu BL` = `{bl_req_val}` => Kết quả bắt buộc: {verdict_22}."
+        )
+
+    bill_cmp = extract_bill_no_comparison(checklist_text, bl_text)
+    if bill_cmp["verdict"]:
+        cl_b = bill_cmp["checklist_bill"] or "Không tìm thấy"
+        bl_b = bill_cmp["bl_bill"] or "Không tìm thấy"
+        lines.append(
+            f"- Hạng mục 24 (`SỐ BILL` - `BILL OF LADING (AIR WAYBILL)` vs `Sea Waybill / B/L No.`): "
+            f"Cột `Dữ liệu BL Check List` = `{cl_b}` | Cột `Dữ liệu BL` = `{bl_b}` "
+            f"=> Kết quả bắt buộc: **{bill_cmp['verdict']}** "
+            f"(đưa vào Bảng 1 nếu ĐÚNG, Bảng 2 nếu SAI / KHÔNG TÌM THẤY)."
+        )
+
+    inv_cmp = extract_invoice_comparison(checklist_text, bl_text)
+    if inv_cmp["verdict"]:
+        det_str = ", ".join(inv_cmp["detail_invoices"]) if inv_cmp["detail_invoices"] else "Không tìm thấy"
+        gt_str = (
+            f"{inv_cmp['gtotal_raw']} (hiểu là {', '.join(inv_cmp['gtotal_invoices'])})"
+            if inv_cmp["gtotal_invoices"]
+            else "Không tìm thấy"
+        )
+        lines.append(
+            f"- Hạng mục 25 (`SỐ INVOICE` - đối chiếu đủ invoice trên trang `G-TOTAL`): "
+            f"Các trang chi tiết = `{det_str}` | Trang `G-TOTAL` = `{gt_str}` "
+            f"=> Kết quả bắt buộc: **{inv_cmp['verdict']}** "
+            f"(đưa vào Bảng 1 nếu ĐÚNG, Bảng 2 nếu SAI / KHÔNG TÌM THẤY)."
         )
 
     if len(lines) == 1:
@@ -2612,8 +2898,23 @@ def reconcile_compare_counts(md: str) -> str:
         m = re.search(r"\d+", parts[1] if len(parts) > 1 else "99")
         return int(m.group(0)) if m else 99
 
-    clean_t1.sort(key=get_stt)
-    clean_t2.sort(key=get_stt)
+    def dedup_by_stt(rows: list[str]) -> list[str]:
+        by_stt: dict[int, str] = {}
+        extras: list[str] = []
+        for row in rows:
+            stt = get_stt(row)
+            if stt == 99:
+                extras.append(row)
+                continue
+            is_repeat_note = bool(re.search(r"\(\s*Lặp\s+lại", row, re.I))
+            if stt not in by_stt:
+                by_stt[stt] = row
+            elif re.search(r"\(\s*Lặp\s+lại", by_stt[stt], re.I) and not is_repeat_note:
+                by_stt[stt] = row
+        return [by_stt[k] for k in sorted(by_stt)] + extras
+
+    clean_t1 = dedup_by_stt(clean_t1)
+    clean_t2 = dedup_by_stt(clean_t2)
 
     actual_dung = len(clean_t1)
     sai_count = 0

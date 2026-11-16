@@ -186,7 +186,17 @@ _BL_LABEL_ANCHORS: list[tuple[str, re.Pattern[str]]] = [
         re.compile(r"^(?:Also\s+Notify(?:\s*Party)?(?:\s*[-–]?\s*routing\s*&\s*Instructions)?|Notify\s+Part(?:y|ies)\s*(?:2|\(\s*2\s*\))|…?\s*CONTINUED\s+FROM\s+NOTIFY\s+PARTIES)", re.I),
     ),
     ("Booking No.", re.compile(r"^(?:Booking\s+Ref\.?|Booking\s+No\.?)\b", re.I)),
-    ("Sea Waybill / B/L No.", re.compile(r"^(?:Sea\s+Waybill\s+No\.?|B/L\s+No\.?|Bill\s+of\s+Lading\s+No\.?|BILL\s+OF\s+LADING\s*\(AIR\s+WAYBILL\))", re.I)),
+    (
+        "Sea Waybill / B/L No.",
+        re.compile(
+            r"^(?:Sea\s+Waybill(?:\s+No\.?)?(?!\s+(?:Standard|Terms|Uniform|Clause|Rules))|"
+            r"B/L\s*(?:No\.?|NUMBER)\b|Bill\s+of\s+Lading\s*(?:No\.?|NUMBER)\b|"
+            r"BILL\s+OF\s+LADING\s*\(AIR\s+WAYBILL\))",
+            re.I,
+        ),
+    ),
+    ("Invoice No.", re.compile(r"^INVOICE\s+NO\.?\b", re.I)),
+    ("Freight", re.compile(r"^FREIGHT\s*:", re.I)),
     ("Export References", re.compile(r"^Export\s+References\b", re.I)),
     ("Forwarding Agent", re.compile(r"^Forwarding\s+Agent(?:\s+and\s+References)?(?:\s+FMC/CHB\s+No\.?)?\b", re.I)),
     ("Point and Country of Origin", re.compile(r"^Point\s+and\s+Country\s+of\s+Origin\b", re.I)),
@@ -793,7 +803,12 @@ def _extract_bl_anchor_boxes(
                 inline_val = same_line_val
 
         # For multi-line party boxes, strictly exclude words on the header bar itself (w.cy <= anc["y1"] + 1.5)
-        min_word_cy = (anc["y1"] + 1.5) if is_party_box else (anc["y1"] - 2.0)
+        if is_party_box:
+            min_word_cy = anc["y1"] + 1.5
+        elif anc["label"] in ("Sea Waybill / B/L No.", "Booking No.", "Request No. / Shipment No."):
+            min_word_cy = anc["y0"] - 2.0
+        else:
+            min_word_cy = anc["y1"] - 2.0
         for w in words:
             if id(w) in anc["header_words"]:
                 continue
@@ -832,6 +847,16 @@ def _extract_bl_anchor_boxes(
             elif not is_party_box or not cleaned_lines:
                 cleaned_lines.insert(0, inline_val)
 
+        if anc["label"] == "Sea Waybill / B/L No." and cleaned_lines:
+            bill_candidates: list[str] = []
+            for ln in cleaned_lines:
+                ln_clean = re.sub(r"\b(?:FREIGHT|INVOICE\s+NO\.?|PAGE|COLLECT|PREPAID)\b.*$", "", ln, flags=re.I).strip(" |:")
+                m_bill = re.search(r"\b([A-Z]{2,}[A-Z0-9-]{4,}|[0-9]{6,}[A-Z0-9-]*)\b", ln_clean)
+                if m_bill:
+                    bill_candidates.append(m_bill.group(1))
+                    break
+            if bill_candidates:
+                cleaned_lines = bill_candidates
         final_val = "\n".join(cleaned_lines).strip()
         if final_val:
             # Skip Check List Print Date ('DATE | PAGE') so it never confuses Issue Date / ETD

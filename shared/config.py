@@ -73,10 +73,10 @@ class Settings(BaseSettings):
 
     # --- LLM ---
     ollama_host: str = Field(default="http://ollama:11434")
-    ollama_model: str = Field(default="gemma4:latest")
+    ollama_model: str = Field(default="qwen3.8:latest")
     ollama_vision_model: str | None = Field(default=None, description="Optional dedicated Vision model for PDF OCR")
     ollama_embed_model: str = Field(default="nomic-embed-text")
-    ollama_timeout: int = Field(default=300, description="LLM request timeout in seconds")
+    ollama_timeout: int = Field(default=900, description="LLM request timeout in seconds")
     ollama_num_threads: int | None = Field(default=None, description="Number of CPU threads for Ollama inference")
     ollama_num_predict: int = Field(default=1024, description="Max output tokens per response")
     ollama_num_ctx: int = Field(default=8192, description="Context window size for Ollama inference")

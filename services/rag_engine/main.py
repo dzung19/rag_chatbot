@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import time
+import httpx
 from typing import AsyncGenerator
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -78,7 +79,7 @@ def _get_llm_client() -> OllamaLLMClient:
         _llm_client = OllamaLLMClient(
             ollama_host=settings.ollama_host,
             model=settings.ollama_model,
-            timeout=settings.ollama_timeout,
+            timeout=max(settings.ollama_timeout, 900),
             num_threads=settings.ollama_num_threads,
             max_concurrency=settings.llm_max_concurrency,
             queue_timeout=settings.llm_queue_timeout,
@@ -298,6 +299,12 @@ async def query_sync(
 
         # Post-process to clean LaTeX math arrows to simple Unicode arrows
         answer = _clean_latex_arrows(raw_answer)
+        if request.skill_id == "business-compare":
+            try:
+                from compare_engine import reconcile_compare_counts
+            except ImportError:
+                from services.rag_engine.compare_engine import reconcile_compare_counts
+            answer = reconcile_compare_counts(answer)
 
         # 4. Build source documents with enriched metadata
         sources = [
@@ -458,26 +465,6 @@ async def query_stream(request: ChatRequest):
                 modifier_skills=modifier_skills,
             )
             
-            """ 
-            Liability）andArticle17                                                                                                                   +
-            M345JE,ENGLANDTEL+44(0)7795408300                                                                                                         +
-            EMAIL:AGNIESZKA.CALKA-BONCZAK@BROTHER.CO.UK | documentoftiteanddelivery shallbemadetothenamedconsigneeonproductionof suchreasonableproofof+
-            EORI:DE760551960552887 | identityasmayberequiredbyteCarrrInwitesswhereoftheundersigedunbealfftheCarierhas                                 +
-            signed thenumberofBilsstatedhereunder,allof thistenoranddate.Where issuedasaBillofLadingdelivery                                          +
-            VAT+864450220 | maybemadeagainstonlyone originalBilinwhichcase,theothers shallstandvoid.（Termscontinuedon                                +
-            backhereof andenlargedcnpynf hack clausesis availablefrom the Carrier uponrequestoronCarrier's                                            +
-            NotifyParty | websiteathttps:/www.yusen-logistics.com/services/end-to-end-transportation/ocean-freight-forwarding/ocean-                  +
-            freight-forwarding-terms-and-conditions).                                                                                                 +
-            BROTHER INTERNATIONAL EUROPE LTD.                                                                                                         +
-            BROTHER HOUSE，1TAME STREET，GUIDE BRIDGE，                                                                                               +
-            AUDENSHAW,MANCHESTER, | Export/lmportReference(fortheMerchant'sand/orCarrier'sreference only)                                             +
-            M34 5JE,ENGLAND TEL+44(0)7795408300                                                                                                       +
-            EMAIL:AGNIESZKA.CALKA-BONCZAK@BROTHER.CO.UK                                                                                               +
-            ForwardingAgentReference(forfreightforwarder'sreferenceonly)                                                                              +
-            VAT+864450220                                                                                                                             +
-            --More-- 
-            """
-            
             final_prompt = "\n".join(
                 str(m.get("content") or "") for m in messages
             ).upper()
@@ -514,31 +501,47 @@ async def query_stream(request: ChatRequest):
                 async with aclosing(
                     _clean_stream_tokens(token_gen)
                 ) as cleaned:
-                    async for token in cleaned:
-                        if not token:
-                            continue
+                    if request.skill_id == "business-compare":
+                        buffered_tokens: list[str] = []
+                        async for token in cleaned:
+                            if token:
+                                buffered_tokens.append(token)
+                        full_answer = "".join(buffered_tokens)
+                        if full_answer:
+                            try:
+                                from compare_engine import reconcile_compare_counts
+                            except ImportError:
+                                from services.rag_engine.compare_engine import reconcile_compare_counts
+                            full_answer = reconcile_compare_counts(full_answer)
+                            output_events = 1
+                            output_chars = len(full_answer)
+                            yield {
+                                "event": "token",
+                                "data": json.dumps(
+                                    full_answer,
+                                    ensure_ascii=False,
+                                ),
+                            }
+                    else:
+                        async for token in cleaned:
+                            if not token:
+                                continue
 
-                        if output_events == 0:
-                            logger.info(
-                                "RAG first token event emitted."
-                            )
+                            if output_events == 0:
+                                logger.info(
+                                    "RAG first token event emitted."
+                                )
 
-                        output_events += 1
-                        output_chars += len(token)
+                            output_events += 1
+                            output_chars += len(token)
 
-                        yield {
-                            "event": "token",
-                            "data": json.dumps(
-                                token,
-                                ensure_ascii=False,
-                            ),
-                        }
-
-            logger.info(
-                "RAG stream finished: events=%d chars=%d",
-                output_events,
-                output_chars,
-            )
+                            yield {
+                                "event": "token",
+                                "data": json.dumps(
+                                    token,
+                                    ensure_ascii=False,
+                                ),
+                            }
 
             if output_chars == 0:
                 raise RuntimeError(
@@ -547,7 +550,7 @@ async def query_stream(request: ChatRequest):
 
             yield {"event": "done", "data": ""}
 
-        except TimeoutError as te:
+        except (TimeoutError, httpx.TimeoutException) as te:
             logger.error("Streaming query timed out in LLM queue: %s", str(te))
             yield {
                 "event": "error",

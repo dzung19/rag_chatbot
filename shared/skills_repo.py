@@ -101,8 +101,8 @@ BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, H
 
 - **Hạng mục 6 (`CONTAINER NO.`)**: Lấy danh sách số container (dạng 4 chữ cái + 7 chữ số như `TXGU7489205`, `EGSU9442843`...) từ dòng `STUFFING PLAN` trên Check List và ô Container trên BL. Tuyệt đối không lấy chuỗi loại container (`40HC:40FT...`) điền vào ô Container No.
 
-# Danh sách 23 hạng mục bắt buộc kiểm tra (giữ đúng STT 1 -> 23)
-1. SHIPPER. 2. CONSIGNEE. 3. NOTIFY PARTY 1. 4. NOTIFY PARTY 2. 5. DELIVERY TO. 6. CONTAINER NO. 7. SEAL NO. 8. CONTAINER TYPE. 9. P'KGS. 10. WEIGHT. 11. MEASUREMENT/M3. 12. Tổng P'KGS, WEIGHT và MEASUREMENT/M3. 13. GOODS DESCRIPTION. 14. PORT OF LOADING. 15. PORT OF DISCHARGE. 16. PLACE OF DELIVERY. 17. ETD. 18. ISSUE DATE = ETD. 19. Tổng số container + loại container. 20. Delivery term. 21. SHIPMENT NO. 22. B/L REQUIRED. 23. HS code.
+# Danh sách hạng mục bắt buộc kiểm tra (giữ đúng STT 1 -> 25)
+1. SHIPPER. 2. CONSIGNEE. 3. NOTIFY PARTY 1. 4. NOTIFY PARTY 2. 5. DELIVERY TO. 6. CONTAINER NO. 7. SEAL NO. 8. CONTAINER TYPE. 9. P'KGS. 10. WEIGHT. 11. MEASUREMENT/M3. 12. Tổng P'KGS, WEIGHT và MEASUREMENT/M3. 13. GOODS DESCRIPTION. 14. PORT OF LOADING. 15. PORT OF DISCHARGE. 16. PLACE OF DELIVERY. 17. ETD. 18. ISSUE DATE = ETD. 19. Tổng số container + loại container. 20. Delivery term. 21. SHIPMENT NO. 22. B/L REQUIRED. 23. HS code. 24. SỐ BILL. 25. SỐ INVOICE.
 
 # Định dạng đầu ra (Báo cáo dạng Bảng Markdown)
 
@@ -111,12 +111,12 @@ BROTHER INDUSTRIES (VIETNAM) LTD. PHUC DIEN INDUSTRIAL ZONE, MAO DIEN COMMUNE, H
 |---|---|---|---|---|
 | ... | ... | ... | ... | **ĐÚNG** |
 
-*(Mỗi hạng mục ĐÚNG từ 1 đến 23 trình bày gọn thành 1 dòng theo đúng STT. Cuối bảng ghi rõ: **Tổng số điểm đúng: X**)*
+*(Mỗi hạng mục ĐÚNG từ 1 đến 25 trình bày gọn thành 1 dòng theo đúng STT. Cuối bảng ghi rõ: **Tổng số điểm đúng: X**)*
 
 # Quy tắc thống kê tổng số điểm
 - Cuối Bảng 1: BẮT BUỘC đếm chính xác số lượng dòng thực tế đã liệt kê trong Bảng 1 để ghi vào **Tổng số điểm đúng: X** (Ví dụ nếu có 19 dòng trong Bảng 1 thì X bắt buộc là 19, tuyệt đối không đoán số).
 - Cuối Bảng 2: BẮT BUỘC đếm chính xác số lượng dòng thực tế theo từng loại kết quả trong Bảng 2 để ghi vào **Tổng số điểm SAI: X | KHÔNG TÌM THẤY: Y | KHÔNG HIỂU: Z**.
-- Tổng số điểm của cả 2 bảng (Đúng + SAI + Không tìm thấy + Không hiểu) phải bằng đúng 23 hạng mục kiểm tra.
+- Tổng số điểm của cả 2 bảng (Đúng + SAI + Không tìm thấy + Không hiểu) phải bằng đúng 25 hạng mục kiểm tra.
 
 ---
 
