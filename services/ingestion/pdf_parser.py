@@ -34,6 +34,28 @@ import unicodedata
 
 import httpx
 
+try:
+    from shared.shipping_schema import (
+        BoundingBox,
+        ExtractedContainer,
+        ExtractedField,
+        GrandTotalData,
+        ShippingDocumentData,
+        serialize_shipping_data_block,
+    )
+except ImportError:
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+    from shared.shipping_schema import (
+        BoundingBox,
+        ExtractedContainer,
+        ExtractedField,
+        GrandTotalData,
+        ShippingDocumentData,
+        serialize_shipping_data_block,
+    )
+
 logger = logging.getLogger(__name__)
 
 _RAPIDOCR_ENGINE: Any = None
@@ -338,19 +360,32 @@ def parse_pdf_document(file_path: str) -> Generator[str, None, None]:
 
         # Pre-scan repeating margin headers/footers across multi-page documents (>= 3 pages)
         repeating_margins = _detect_repeating_margin_lines(doc) if total_pages >= 3 else set()
+        doc_data = ShippingDocumentData()
+        has_shipping_data = False
+        pending_page: Optional[str] = None
 
         for page_idx in range(total_pages):
             page = doc[page_idx]
             page_num = page_idx + 1
-            page_text = _extract_single_page(
+            page_text, page_is_shipping = _extract_single_page(
                 page=page,
                 page_num=page_num,
                 total_pages=total_pages,
                 repeating_margins=repeating_margins,
                 file_path=file_path,
+                doc_data=doc_data,
             )
+            if page_is_shipping:
+                has_shipping_data = True
             if page_text and page_text.strip():
-                yield page_text.strip()
+                if pending_page is not None:
+                    yield pending_page
+                pending_page = page_text.strip()
+
+        if pending_page is not None:
+            if has_shipping_data and (doc_data.fields or doc_data.containers or doc_data.detail_invoices):
+                pending_page = f"{pending_page}\n\n{serialize_shipping_data_block(doc_data)}"
+            yield pending_page
     finally:
         doc.close()
         _release_ocr_memory()
@@ -367,8 +402,9 @@ def _extract_single_page(
     total_pages: int,
     repeating_margins: set[str],
     file_path: str,
-) -> str:
-    """Extract structured markdown text from a single PDF page."""
+    doc_data: Optional[ShippingDocumentData] = None,
+) -> tuple[str, bool]:
+    """Extract structured markdown text (and optional 2D shipping data) from a single PDF page."""
     rect = page.rect
     page_width = float(rect.width or 600.0)
     page_height = float(rect.height or 800.0)
@@ -385,7 +421,7 @@ def _extract_single_page(
         return (
             f"=== TRANG {page_num}/{total_pages} ===\n"
             "[ĐIỀU KHOẢN VẬN TẢI TIÊU CHUẨN CỦA HÃNG TÀU (TERMS & CONDITIONS) - KHÔNG CHỨA DỮ LIỆU ĐỐI CHIẾU HÀNG HÓA]"
-        )
+        ), False
 
     raw_words = page.get_text("words") or []
     words: list[WordBox] = []
@@ -425,7 +461,7 @@ def _extract_single_page(
         len(words),
         total_chars,
     )
-    
+
     needs_ocr = _needs_page_ocr(words, native_text)
 
     logger.info(
@@ -437,13 +473,23 @@ def _extract_single_page(
         total_chars,
         needs_ocr,
     )
-    
+
     # 1. Check if page is Scanned / Image-only (or hybrid with missing text layer)
-    if _needs_page_ocr(words, native_text):
-        ocr_text = _extract_scanned_page_text(page, page_num, total_pages, file_path)
-        if ocr_text and len(ocr_text.strip()) > max(total_chars, len(native_text.strip())):
-            enriched_ocr = _append_shipping_structured_summary(ocr_text, page_num)
-            return f"=== TRANG {page_num}/{total_pages} ===\n{enriched_ocr}"
+    is_ocr_words = False
+    if needs_ocr:
+        ocr_words, ocr_fallback_text = _extract_scanned_page_words_and_text(
+            page, page_num, total_pages, file_path
+        )
+        if ocr_words and sum(len(w.text) for w in ocr_words) > max(total_chars, len(native_text.strip())):
+            words = ocr_words
+            total_chars = sum(len(w.text) for w in words)
+            is_ocr_words = True
+        elif ocr_fallback_text and len(ocr_fallback_text.strip()) > max(total_chars, len(native_text.strip())):
+            enriched_ocr = _append_shipping_structured_summary(ocr_fallback_text, page_num)
+            is_ship_ocr = _is_shipping_or_form_page(ocr_fallback_text)
+            if is_ship_ocr and doc_data is not None:
+                _update_shipping_doc_totals_from_text(doc_data, enriched_ocr)
+            return f"=== TRANG {page_num}/{total_pages} ===\n{enriched_ocr}", is_ship_ocr
 
     if not words:
         if native_text:
@@ -454,16 +500,19 @@ def _extract_single_page(
             return (
                 f"=== TRANG {page_num}/{total_pages} ===\n"
                 f"{native_text}"
-            )
+            ), False
 
         logger.error(
             "PDF page has no extracted text after OCR/Vision: page=%d",
             page_num,
         )
-        return ""
+        return "", False
 
     # 2. Group words into horizontal visual lines (sorted top-to-bottom)
-    visual_lines = _cluster_words_into_visual_lines(words, y_tolerance=3.2)
+    visual_lines = _cluster_words_into_visual_lines(
+        words,
+        y_tolerance=5.0 if is_ocr_words else 3.2,
+    )
 
     # Filter out full visual lines that match repeating header/footer boilerplate
     if repeating_margins:
@@ -481,7 +530,7 @@ def _extract_single_page(
     words = [w for w in words if id(w) in visible_word_ids]
     if not visual_lines:
         # Do not reintroduce intentionally removed repeating margins.
-        return ""
+        return "", False
 
     # 3. Check if this page looks like a Shipping / Form Document (BL, Sea Waybill, Check List)
     full_plain_probe = "\n".join(vl.render_plain() for vl in visual_lines)
@@ -494,8 +543,12 @@ def _extract_single_page(
             visual_lines=visual_lines,
             page_width=page_width,
             page_height=page_height,
+            page_num=page_num,
+            doc_data=doc_data,
         )
         body_text = _append_shipping_structured_summary(body_text, page_num)
+        if doc_data is not None:
+            _update_shipping_doc_totals_from_text(doc_data, body_text)
     else:
         # Standard corporate document (policies, schedules, SOPs):
         # Use safe table extraction when tables don't slice words, combined with visual lines
@@ -506,7 +559,7 @@ def _extract_single_page(
             page_width=page_width,
         )
 
-    return _finalize_page_text(body_text, native_text, page_num, total_pages)
+    return _finalize_page_text(body_text, native_text, page_num, total_pages), is_shipping_doc
 
 
 # ---------------------------------------------------------------------------
@@ -588,6 +641,8 @@ def _reconstruct_shipping_or_form_page(
     visual_lines: list[VisualLine],
     page_width: float,
     page_height: float,
+    page_num: int = 1,
+    doc_data: Optional[ShippingDocumentData] = None,
 ) -> str:
     """Reconstruct a shipping/form page by combining:
     1. Spatial Box Extraction for form fields (Shipper, Consignee, Ports, Booking/BL No, Dates)
@@ -595,8 +650,16 @@ def _reconstruct_shipping_or_form_page(
     """
     sections: list[str] = []
 
-    # Step 1: Extract structured form boxes via Label Anchors + Vector Split Lines
-    boxed_fields = _extract_bl_anchor_boxes(words, visual_lines, page, page_width, page_height)
+    # Step 1: Extract structured form boxes via Label Anchors + Vector Split Lines + Vertical Gutter
+    boxes_meta: list[dict[str, Any]] = []
+    boxed_fields = _extract_bl_anchor_boxes(
+        words,
+        visual_lines,
+        page,
+        page_width,
+        page_height,
+        out_boxes_meta=boxes_meta,
+    )
     if boxed_fields:
         box_lines = ["### [THÔNG TIN Ô BIỂU MẪU (FORM BOXES)]"]
         for label, val in boxed_fields:
@@ -606,14 +669,89 @@ def _reconstruct_shipping_or_form_page(
         if len(box_lines) > 1:
             sections.append("\n".join(box_lines))
 
+    # Step 1.5: Populate 2D structured ShippingDocumentData (if requested)
+    if doc_data is not None:
+        _populate_shipping_doc_data_from_page(
+            doc_data=doc_data,
+            words=words,
+            visual_lines=visual_lines,
+            boxes_meta=boxes_meta,
+            page_width=page_width,
+            page_height=page_height,
+            page_num=page_num,
+        )
+
     # Step 2: Render full page in visual layout order (preserving exact horizontal alignment)
-    # Also detect if there is a multi-column split in the upper form section so we don't
-    # mix left-column address lines with right-column reference numbers.
     layout_lines = _render_layout_aware_lines(visual_lines, page_width)
     if layout_lines:
         sections.append("### [NỘI DUNG CHI TIẾT TRANG (LAYOUT PRESERVED)]\n" + "\n".join(layout_lines))
 
     return "\n\n".join(sections)
+
+
+def _detect_vertical_column_gutter(
+    visual_lines: list[VisualLine],
+    v_lines: list[tuple[float, float, float]],
+    page_width: float,
+    cargo_top_y: float,
+) -> Optional[float]:
+    """Detect a consistent vertical column split near the center of the upper form section."""
+    x_min = page_width * 0.38
+    x_max = page_width * 0.62
+
+    # 1. Prefer an explicit long vertical vector rule near the center
+    best_vx: Optional[float] = None
+    best_len = 0.0
+    for vx, vy0, vy1 in v_lines:
+        if x_min <= vx <= x_max and vy0 < cargo_top_y:
+            span = min(vy1, cargo_top_y) - max(vy0, 0.0)
+            if span >= 60.0 and span > best_len:
+                best_len = span
+                best_vx = vx
+    if best_vx is not None:
+        return best_vx
+
+    # 2. Fallback for scanned / borderless PDFs: X-projection of empty vertical strip
+    #    requiring words on BOTH left (< x) and right (> x) in the upper section.
+    upper_words = [
+        w
+        for vl in visual_lines
+        if vl.y0 < cargo_top_y and len(_split_visual_line_into_segments(vl, gap_threshold=14.0)) == 2
+        for w in vl.words
+    ]
+    if len(upper_words) < 6:
+        return None
+
+    step = 2.0
+    best_run_start = None
+    best_run_len = 0
+    cur_run_start = None
+    cur_run_len = 0
+
+    x = x_min
+    while x <= x_max:
+        has_word = any(w.x0 - 1.0 <= x <= w.x1 + 1.0 for w in upper_words)
+        if not has_word:
+            if cur_run_start is None:
+                cur_run_start = x
+                cur_run_len = 1
+            else:
+                cur_run_len += 1
+            if cur_run_len > best_run_len:
+                best_run_len = cur_run_len
+                best_run_start = cur_run_start
+        else:
+            cur_run_start = None
+            cur_run_len = 0
+        x += step
+
+    if best_run_start is not None and best_run_len * step >= 12.0:
+        gutter_mid = best_run_start + (best_run_len * step) * 0.5
+        has_left = any(w.x1 < gutter_mid for w in upper_words)
+        has_right = any(w.x0 > gutter_mid for w in upper_words)
+        if has_left and has_right:
+            return gutter_mid
+    return None
 
 
 def _extract_bl_anchor_boxes(
@@ -622,6 +760,7 @@ def _extract_bl_anchor_boxes(
     page: Any,
     page_width: float,
     page_height: float,
+    out_boxes_meta: Optional[list[dict[str, Any]]] = None,
 ) -> list[tuple[str, str]]:
     """Locate standard BL form labels and extract the text confined within each label's box."""
     # Find horizontal and vertical grid lines from PDF vector drawings
@@ -688,6 +827,8 @@ def _extract_bl_anchor_boxes(
             cargo_top_y = vl.y0 - 2.0
             break
 
+    gutter_x = _detect_vertical_column_gutter(visual_lines, v_lines, page_width, cargo_top_y)
+
     extracted: list[tuple[str, str]] = []
 
     for idx, anc in enumerate(anchors):
@@ -695,8 +836,10 @@ def _extract_bl_anchor_boxes(
         ay0 = anc["y0"] - 2.0
 
         # 1. Determine right boundary (box_x1):
-        # Look for another anchor on roughly the same row or a vertical grid line to the right
+        # Look for another anchor on roughly the same row, a vertical grid line, or detected column gutter
         right_candidates = [page_width - 5.0]
+        if gutter_x is not None and anc["x0"] < gutter_x - 20.0 and anc["y0"] < cargo_top_y:
+            right_candidates.append(gutter_x - 2.0)
         for other in anchors:
             if other is anc:
                 continue
@@ -868,11 +1011,273 @@ def _extract_bl_anchor_boxes(
                     continue
                 if re.match(r"^BIVN\b", final_val.strip(), re.I):
                     final_val = "BIVN (BROTHER INDUSTRIES (VIETNAM) LTD.)"
+                    cleaned_lines = [final_val]
             extracted.append((anc["label"], final_val))
+            if out_boxes_meta is not None:
+                out_boxes_meta.append(
+                    {
+                        "label": anc["label"],
+                        "value": final_val,
+                        "raw_lines": list(cleaned_lines),
+                        "is_empty": False,
+                        "x0": ax0,
+                        "y0": ay0,
+                        "x1": box_x1,
+                        "y1": box_y1,
+                    }
+                )
         elif anc["label"] == "9. Place of Delivery":
             extracted.append((anc["label"], "N/A (Trống / Không có dữ liệu trên BL)"))
+            if out_boxes_meta is not None:
+                out_boxes_meta.append(
+                    {
+                        "label": anc["label"],
+                        "value": "",
+                        "raw_lines": [],
+                        "is_empty": True,
+                        "x0": ax0,
+                        "y0": ay0,
+                        "x1": box_x1,
+                        "y1": box_y1,
+                    }
+                )
+        elif out_boxes_meta is not None:
+            out_boxes_meta.append(
+                {
+                    "label": anc["label"],
+                    "value": "",
+                    "raw_lines": [],
+                    "is_empty": True,
+                    "x0": ax0,
+                    "y0": ay0,
+                    "x1": box_x1,
+                    "y1": box_y1,
+                }
+            )
 
     return extracted
+
+
+_GRID_HEADER_ALIASES: list[tuple[str, re.Pattern[str]]] = [
+    ("from_port", re.compile(r"^FROM\b", re.I)),
+    ("etd", re.compile(r"^ETD\b", re.I)),
+    ("via_port", re.compile(r"^VIA\b", re.I)),
+    ("eta", re.compile(r"^ETA\b", re.I)),
+    ("to_port", re.compile(r"^TO\b", re.I)),
+    ("voyage_no", re.compile(r"^VOY(?:AGE)?\.?\s*NO\.?$", re.I)),
+    ("booking_no", re.compile(r"^BOOKING\s*(?:NO\.?|REF\.?)$", re.I)),
+    ("port_of_loading", re.compile(r"^(?:7\.?\s*)?PORT\s+OF\s+LOADING$", re.I)),
+    ("port_of_discharge", re.compile(r"^(?:8\.?\s*)?PORT\s+OF\s+DISCHARGE$", re.I)),
+    ("place_of_delivery", re.compile(r"^(?:9\.?\s*)?PLACE\s+OF\s+DELIVERY$", re.I)),
+    ("vessel", re.compile(r"^(?:6\.?\s*)?(?:OCEAN\s+)?VESSEL$", re.I)),
+    ("issue_place", re.compile(r"^P[il]ace\s+of\s+Bill\(?s\)?\s*Issued$", re.I)),
+    ("issue_date", re.compile(r"^Dated$", re.I)),
+]
+
+
+def _extract_grid_row_cells_by_x(
+    visual_lines: list[VisualLine],
+    words: list[WordBox],
+    page_width: float,
+    page_num: int,
+) -> dict[str, ExtractedField]:
+    """Align multi-column header rows and extract cell values strictly by horizontal X-intervals."""
+    results: dict[str, ExtractedField] = {}
+    for idx, vl in enumerate(visual_lines):
+        segments = _split_visual_line_into_segments(vl, gap_threshold=14.0)
+        if len(segments) < 2:
+            continue
+
+        matched_cols: list[tuple[str, str, float, float]] = []
+        for seg_words in segments:
+            seg_text = " ".join(w.text for w in seg_words).strip(" :.")
+            if not seg_text:
+                continue
+            for canon_key, pat in _GRID_HEADER_ALIASES:
+                if pat.match(seg_text):
+                    matched_cols.append(
+                        (
+                            canon_key,
+                            seg_text,
+                            min(w.x0 for w in seg_words),
+                            max(w.x1 for w in seg_words),
+                        )
+                    )
+                    break
+
+        if len(matched_cols) < 2:
+            continue
+
+        matched_cols.sort(key=lambda c: c[2])
+        row_top_y = vl.y1 - 1.0
+        row_bot_y = min(
+            vl.y1 + 26.0,
+            visual_lines[idx + 1].y1 + 6.0 if idx + 1 < len(visual_lines) else vl.y1 + 26.0,
+        )
+        # Stop before next header-like row
+        if idx + 1 < len(visual_lines):
+            next_txt = visual_lines[idx + 1].render_plain().strip()
+            if any(pat.search(next_txt) for _, pat in _GRID_HEADER_ALIASES):
+                # Check if next line is itself a header rather than value
+                next_segs = _split_visual_line_into_segments(visual_lines[idx + 1], gap_threshold=14.0)
+                if len(next_segs) >= 2 and all(
+                    any(pat.match(" ".join(w.text for w in s).strip(" :.")) for _, pat in _GRID_HEADER_ALIASES)
+                    for s in next_segs[:2]
+                ):
+                    continue
+
+        for col_i, (canon_key, src_lbl, hx0, hx1) in enumerate(matched_cols):
+            col_x0 = hx0 - 8.0
+            col_x1 = (matched_cols[col_i + 1][2] - 4.0) if (col_i + 1 < len(matched_cols)) else (page_width - 5.0)
+            cell_words = [
+                w
+                for w in words
+                if col_x0 <= w.cx <= col_x1 and row_top_y < w.cy <= row_bot_y
+            ]
+            if not cell_words:
+                if canon_key not in results:
+                    results[canon_key] = ExtractedField(
+                        value="",
+                        raw_lines=[],
+                        source_label=src_lbl,
+                        is_empty=True,
+                        bbox=BoundingBox(page=page_num, x0=col_x0, y0=row_top_y, x1=col_x1, y1=row_bot_y),
+                    )
+                continue
+
+            cell_lines = _cluster_words_into_visual_lines(cell_words, y_tolerance=3.5)
+            raw_lines = [cl.render_plain() for cl in cell_lines if cl.render_plain()]
+            val = " ".join(raw_lines).strip()
+            if canon_key == "place_of_delivery":
+                val = re.sub(r"\s+(?:CY|DOOR|CFS|SDD)\s*$", "", val, flags=re.I).strip(" :.-")
+            if val and canon_key not in results:
+                results[canon_key] = ExtractedField(
+                    value=val,
+                    raw_lines=raw_lines,
+                    source_label=src_lbl,
+                    is_empty=False,
+                    bbox=BoundingBox(
+                        page=page_num,
+                        x0=min(w.x0 for w in cell_words),
+                        y0=min(w.y0 for w in cell_words),
+                        x1=max(w.x1 for w in cell_words),
+                        y1=max(w.y1 for w in cell_words),
+                    ),
+                )
+    return results
+
+
+_BOX_LABEL_TO_SCHEMA_KEY: dict[str, str] = {
+    "1. Shipper": "shipper",
+    "2. Consignee": "consignee",
+    "3. Notify Party": "notify_party_1",
+    "Notify Party 2 / Also Notify": "notify_party_2",
+    "Delivery To": "delivery_to",
+    "From (Request)": "from_port",
+    "To (Request)": "to_port",
+    "7. Port of Loading": "port_of_loading",
+    "8. Port of Discharge": "port_of_discharge",
+    "9. Place of Delivery": "place_of_delivery",
+    "Sea Waybill / B/L No.": "bill_no",
+    "Booking No.": "booking_no",
+    "Request No. / Shipment No.": "shipment_no",
+    "B/L Required": "bl_required",
+    "6. Ocean Vessel / Voy. No.": "vessel",
+    "Shipped Per (Tên tàu)": "vessel",
+    "Voyage No.": "voyage_no",
+    "ETD (Ngày tàu chạy dự kiến)": "etd",
+    "ETA (Ngày tàu đến dự kiến)": "eta",
+    "Date Laden on Board / On Board Date": "on_board_date",
+    "Place and Date of Issue (Nơi & Ngày phát hành B/L)": "place_and_date_of_issue",
+    "Place of Issue": "issue_place",
+    "10. Total Number of Containers/Packages": "total_containers_words",
+    "Freight": "freight_term",
+}
+
+
+def _populate_shipping_doc_data_from_page(
+    doc_data: ShippingDocumentData,
+    words: list[WordBox],
+    visual_lines: list[VisualLine],
+    boxes_meta: list[dict[str, Any]],
+    page_width: float,
+    page_height: float,
+    page_num: int,
+) -> None:
+    """Populate ShippingDocumentData directly from 2D boxes and X-aligned grid cells."""
+    # 1. Determine doc_role if still unknown
+    probe = "\n".join(vl.render_plain() for vl in visual_lines[:15]).upper()
+    if doc_data.doc_role == "unknown":
+        if "B/L CHECK LIST" in probe or "CHECK LIST" in probe:
+            doc_data.doc_role = "checklist"
+        elif any(k in probe for k in ("WAY BILL", "SEA WAYBILL", "BILL OF LADING", "NON-NEGOTIABLE")):
+            doc_data.doc_role = "bl"
+
+    # 2. Populate from 2D anchor boxes (non-empty values never overwritten by empty boxes)
+    for bm in boxes_meta:
+        canon_key = _BOX_LABEL_TO_SCHEMA_KEY.get(bm["label"])
+        if not canon_key:
+            continue
+        ef = ExtractedField(
+            value=bm["value"],
+            raw_lines=bm["raw_lines"],
+            source_label=bm["label"],
+            is_empty=bm["is_empty"],
+            bbox=BoundingBox(
+                page=page_num,
+                x0=bm["x0"],
+                y0=bm["y0"],
+                x1=bm["x1"],
+                y1=bm["y1"],
+            ),
+        )
+        if canon_key == "place_of_delivery" and ef.is_empty:
+            doc_data.fields.setdefault(canon_key, ef)
+        else:
+            doc_data.set_field_if_missing(canon_key, ef)
+
+    # 3. Populate from 2D X-aligned grid cells
+    grid_cells = _extract_grid_row_cells_by_x(visual_lines, words, page_width, page_num)
+    for canon_key, ef in grid_cells.items():
+        if canon_key == "place_of_delivery" and ef.is_empty:
+            doc_data.fields.setdefault(canon_key, ef)
+        else:
+            doc_data.set_field_if_missing(canon_key, ef)
+
+
+def _update_shipping_doc_totals_from_text(doc_data: ShippingDocumentData, page_text: str) -> None:
+    """Extract document-level totals (packages/cartons), invoices, and cargo descriptions."""
+    # 1. Total packages & cartons (e.g. Checklist 'TOTAL 242 PACKAGE ( 3,074 CARTONS )' or BL '242 PACKAGES=148 PALLETS +94 CARTONS = 3074 CARTONS')
+    m_pkg_ctn = re.search(
+        r"(\d[\d,]*)\s*PACKAGES?\s*[=(]\s*(?:\d[\d,]*\s*PALLETS?\s*\+\s*\d[\d,]*\s*CARTONS?\s*=\s*)?(\d[\d,]*)\s*CARTONS?",
+        page_text,
+        re.I,
+    )
+    if m_pkg_ctn:
+        p_val = int(m_pkg_ctn.group(1).replace(",", ""))
+        c_val = int(m_pkg_ctn.group(2).replace(",", ""))
+        if p_val > 0:
+            doc_data.grand_total.pkgs = p_val
+        if c_val > 0:
+            doc_data.grand_total.cartons = c_val
+
+    # 2. Document-level goods descriptions (e.g. Yusen Waybill 'ACCESSORY FOR LASER PRINTER', 'PARTS FOR...')
+    for line in page_text.splitlines():
+        clean_ln = " ".join(line.split("|")[0].split()).strip()
+        if not clean_ln:
+            continue
+        if re.search(r"\b(?:YUSEN\s+LOGISTICS|AS\s+THE\s+CARRIER|SHIPPER'?S\s+LOAD|SAID\s+TO\s+CONTAIN|FREIGHT)\b", clean_ln, re.I):
+            continue
+        if re.match(r"^(?:ACCESSORY\s+FOR\s+|PARTS\s+FOR\s+)[A-Z0-9/\-\s]{4,}$", clean_ln, re.I):
+            up_desc = clean_ln.upper()
+            if up_desc not in doc_data.goods_descriptions:
+                doc_data.goods_descriptions.append(up_desc)
+
+    # 3. Detail invoice numbers (Checklist 'INVOICE NO.(BIL )830632-0')
+    for m_inv in re.finditer(r"INVOICE\s*NO\.?\s*\([^)]*\)\s*([A-Z0-9]+-[A-Z0-9]+)", page_text, re.I):
+        inv = m_inv.group(1).upper()
+        if inv not in doc_data.detail_invoices:
+            doc_data.detail_invoices.append(inv)
 
 
 def _extract_inline_value_from_header(canonical_label: str, raw_header: str) -> str:
@@ -1509,26 +1914,36 @@ def _detect_repeating_margin_lines(doc: Any) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def _extract_scanned_page_text(
+def _extract_scanned_page_words_and_text(
     page: Any,
     page_num: int,
     total_pages: int,
     file_path: str,
-) -> str:
-    """Extract text from a scanned/image PDF page via RapidOCR, Tesseract, or Ollama Vision."""
+) -> tuple[list[WordBox], str]:
+    """Extract 2D scaled WordBoxes (via RapidOCR) or fallback text (Tesseract / Ollama Vision)."""
     png_bytes: Optional[bytes] = None
+    rect = page.rect
+    page_w = float(rect.width or 600.0)
+    page_h = float(rect.height or 800.0)
+    pix_w = page_w
+    pix_h = page_h
     try:
         pix = page.get_pixmap(dpi=150, alpha=False)
         try:
+            pix_w = float(pix.width or 1.0)
+            pix_h = float(pix.height or 1.0)
             png_bytes = pix.tobytes("png")
         finally:
             del pix
     except Exception as e:
         logger.warning("Failed to render PDF page %d to image for OCR: %s", page_num, str(e))
-        return ""
+        return [], ""
+
+    scale_x = page_w / pix_w
+    scale_y = page_h / pix_h
 
     try:
-        # 1. Try RapidOCR if installed
+        # 1. Try RapidOCR if installed — preserve 2D WordBoxes scaled to PDF points
         try:
             with _RAPIDOCR_LOCK:
                 ocr_engine = _get_rapidocr_engine()
@@ -1536,16 +1951,22 @@ def _extract_scanned_page_text(
             if result:
                 ocr_words: list[WordBox] = []
                 for box, text_val, _score in result:
-                    xs = [ float(pt[0]) for pt in box ]
-                    ys = [ float(pt[1]) for pt in box ]
+                    norm_txt = _normalize_text(str(text_val)).strip()
+                    if not norm_txt:
+                        continue
+                    xs = [float(pt[0]) * scale_x for pt in box]
+                    ys = [float(pt[1]) * scale_y for pt in box]
                     ocr_words.append(
-                        WordBox(min(xs), min(ys), max(xs), max(ys), _normalize_text(str(text_val)).strip())
+                        WordBox(min(xs), min(ys), max(xs), max(ys), norm_txt)
                     )
-                lines = _cluster_words_into_visual_lines(ocr_words, y_tolerance=6.0)
-                text_out = "\n".join(vl.render(col_gap_pt=25.0) for vl in lines if vl.words)
-                if len(text_out.strip()) >= 30:
-                    logger.info("Extracted scanned page %d of %s via RapidOCR", page_num, file_path)
-                    return text_out
+                if sum(len(w.text) for w in ocr_words) >= 30:
+                    logger.info(
+                        "Extracted scanned page %d of %s via RapidOCR (%d 2D word boxes)",
+                        page_num,
+                        file_path,
+                        len(ocr_words),
+                    )
+                    return ocr_words, ""
         except ImportError:
             logger.info("RapidOCR is not installed.")
             pass
@@ -1566,7 +1987,7 @@ def _extract_scanned_page_text(
             text_out = _normalize_text(pytesseract.image_to_string(img))
             if text_out and len(text_out.strip()) >= 30:
                 logger.info("Extracted scanned page %d of %s via pytesseract", page_num, file_path)
-                return text_out.strip()
+                return [], text_out.strip()
         except ImportError:
             logger.info("pytesseract or Pillow is not installed.")
             pass
@@ -1581,12 +2002,28 @@ def _extract_scanned_page_text(
         vision_text = _ollama_vision_transcribe_page(png_bytes, page_num)
         if vision_text:
             logger.info("Extracted scanned page %d of %s via Ollama Vision", page_num, file_path)
-            return vision_text
+            return [], vision_text
 
-        return ""
+        return [], ""
     finally:
         png_bytes = None
         gc.collect()
+
+
+def _extract_scanned_page_text(
+    page: Any,
+    page_num: int,
+    total_pages: int,
+    file_path: str,
+) -> str:
+    """Backward-compatible wrapper returning plain text for scanned PDF pages."""
+    ocr_words, fallback_text = _extract_scanned_page_words_and_text(
+        page, page_num, total_pages, file_path
+    )
+    if ocr_words:
+        lines = _cluster_words_into_visual_lines(ocr_words, y_tolerance=5.0)
+        return "\n".join(vl.render(col_gap_pt=20.0) for vl in lines if vl.words)
+    return fallback_text
 
 
 def _ollama_vision_transcribe_page(
