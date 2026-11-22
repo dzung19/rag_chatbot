@@ -98,10 +98,41 @@ def _release_ocr_memory() -> None:
             pass
 
 
+def _is_garbled_native_text(native_text: str, *, log: bool = True) -> bool:
+    """Detect broken/custom-encoded PDF fonts (garbled ToUnicode CMap, e.g. '! " # $% EGETOEQUS KHE IFFTEF...')."""
+    stripped = (native_text or "").strip()
+    non_ws = [c for c in stripped if not c.isspace()]
+    if len(non_ws) < 60:
+        return False
+    symbol_ratio = sum(1 for c in non_ws if not c.isalnum()) / len(non_ws)
+    if symbol_ratio > 0.42:
+        if log:
+            logger.warning("Detected garbled PDF font encoding (symbol_ratio=%.2f); forcing OCR.", symbol_ratio)
+        return True
+    ascii_ratio = sum(1 for c in non_ws if ord(c) < 128) / len(non_ws)
+    alpha_words = re.findall(r"[A-Za-z]{2,}", stripped)
+    if ascii_ratio > 0.90 and len(alpha_words) >= 15:
+        common_hits = re.findall(
+            r"\b(?:THE|AND|FOR|OF|TO|IN|ON|BY|OR|IS|AS|AT|WITH|FROM|SHIPPER|CONSIGNEE|NOTIFY|"
+            r"PORT|VESSEL|CONTAINER|BILL|WAYBILL|TOTAL|DATE|PAGE|INVOICE|FREIGHT|GOODS|WEIGHT|"
+            r"CBM|KGS|CARRIER|DELIVERY|RECEIPT|LOADING|DISCHARGE|ORDER|NUMBER|ADDRESS)\b",
+            stripped,
+            re.I,
+        )
+        if len(common_hits) == 0:
+            if log:
+                logger.warning("Detected garbled ASCII PDF font encoding (0 common words in %d alpha words); forcing OCR.", len(alpha_words))
+            return True
+    return False
+
+
 def _needs_page_ocr(words: list[WordBox], native_text: str) -> bool:
-    """Sparse-page heuristic, not a detector for all hybrid PDF pages."""
+    """Detect sparse/scanned pages OR pages with broken/custom PDF font encoding (garbled CMap)."""
     word_chars = sum(len(word.text) for word in words)
-    return (len(words) < 15 or word_chars < 45) and len(native_text.strip()) < 45
+    stripped = (native_text or "").strip()
+    if (len(words) < 15 or word_chars < 45) and len(stripped) < 45:
+        return True
+    return _is_garbled_native_text(native_text, log=True)
 
 
 def _finalize_page_text(body_text: str, native_text: str, page_num: int,
@@ -477,14 +508,18 @@ def _extract_single_page(
     # 1. Check if page is Scanned / Image-only (or hybrid with missing text layer)
     is_ocr_words = False
     if needs_ocr:
+        is_garbled = _is_garbled_native_text(native_text, log=False)
+        min_ocr_chars = 30 if is_garbled else max(total_chars, len(native_text.strip()))
         ocr_words, ocr_fallback_text = _extract_scanned_page_words_and_text(
             page, page_num, total_pages, file_path
         )
-        if ocr_words and sum(len(w.text) for w in ocr_words) > max(total_chars, len(native_text.strip())):
+        if ocr_words and sum(len(w.text) for w in ocr_words) > min_ocr_chars:
             words = ocr_words
             total_chars = sum(len(w.text) for w in words)
             is_ocr_words = True
-        elif ocr_fallback_text and len(ocr_fallback_text.strip()) > max(total_chars, len(native_text.strip())):
+            if is_garbled:
+                native_text = ""
+        elif ocr_fallback_text and len(ocr_fallback_text.strip()) > min_ocr_chars:
             enriched_ocr = _append_shipping_structured_summary(ocr_fallback_text, page_num)
             is_ship_ocr = _is_shipping_or_form_page(ocr_fallback_text)
             if is_ship_ocr and doc_data is not None:
@@ -843,7 +878,7 @@ def _extract_bl_anchor_boxes(
         for other in anchors:
             if other is anc:
                 continue
-            if other["x0"] > anc["x0"] + 25.0 and abs(other["y0"] - anc["y0"]) < 55.0:
+            if other["x0"] > anc["x0"] + 25.0 and abs(other["y0"] - anc["y0"]) < 14.0:
                 right_candidates.append(other["x0"] - 3.0)
         for vx, vy0, vy1 in v_lines:
             if vx > anc["x0"] + 35.0 and vy0 <= anc["y1"] + 10.0 and vy1 >= anc["y0"] - 10.0:
@@ -874,6 +909,9 @@ def _extract_bl_anchor_boxes(
                         "TERMS CONTINUED ON REVERSE",
                         "SEE WEBSITE FOR LARGE VERSION",
                     )
+                ) or (
+                    anc["label"] in ("Delivery To", "Notify Party 2 / Also Notify")
+                    and re.match(r"^(?:\*|TOTAL\s*:|PART\s+OF\b|SHIPPER'?S\s+LOAD\b)", line_up)
                 ):
                     bottom_candidates.append(vl.y0 - 2.0)
                     break
@@ -1013,10 +1051,13 @@ def _extract_bl_anchor_boxes(
                     final_val = "BIVN (BROTHER INDUSTRIES (VIETNAM) LTD.)"
                     cleaned_lines = [final_val]
             extracted.append((anc["label"], final_val))
+            if anc["label"] == "Notify Party 2 / Also Notify" and re.search(r"\bDELIVERY\s+TO\b", anc.get("raw_header", ""), re.I):
+                extracted.append(("Delivery To", final_val))
             if out_boxes_meta is not None:
                 out_boxes_meta.append(
                     {
                         "label": anc["label"],
+                        "raw_header": anc.get("raw_header", ""),
                         "value": final_val,
                         "raw_lines": list(cleaned_lines),
                         "is_empty": False,
@@ -1235,6 +1276,15 @@ def _populate_shipping_doc_data_from_page(
             doc_data.fields.setdefault(canon_key, ef)
         else:
             doc_data.set_field_if_missing(canon_key, ef)
+            if canon_key == "notify_party_2" and re.search(r"\bDELIVERY\s+TO\b", bm.get("raw_header", ""), re.I):
+                ef_deliv = ExtractedField(
+                    value=ef.value,
+                    raw_lines=list(ef.raw_lines),
+                    source_label=bm.get("raw_header") or "NOTIFY PARTY(2)/DELIVERY TO",
+                    is_empty=ef.is_empty,
+                    bbox=ef.bbox,
+                )
+                doc_data.set_field_if_missing("delivery_to", ef_deliv)
 
     # 3. Populate from 2D X-aligned grid cells
     grid_cells = _extract_grid_row_cells_by_x(visual_lines, words, page_width, page_num)

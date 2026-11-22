@@ -404,6 +404,19 @@ def extract_document_containers(full_text: str, is_checklist: bool = False) -> l
             ) or re.search(r"\b(?:cbm|m3|mtq|cu\.?\s*m\.?)\s*[:|]?\s*(\d[\d,.]*)", strict_block, re.I)
             cbm_raw = f"{c_m.group(1).rstrip('.')} CBM" if c_m else "N/A"
 
+            # Fallback for tabular BL rows without inline units: '<pkgs> Carton(s) | <weight> | <cbm>'
+            if weight_raw == "N/A" or cbm_raw == "N/A":
+                tbl_wc = re.search(
+                    r"(?<![A-Z0-9])\d[\d,.]*\s*(?:packages?|pkgs?|pallets?|cartons?|ctns?)(?:\(s\))?\s*\|\s*(\d[\d,]*\.\d+)\s*\|\s*(\d[\d,]*\.\d+)",
+                    strict_block,
+                    re.I,
+                )
+                if tbl_wc:
+                    if weight_raw == "N/A":
+                        weight_raw = f"{tbl_wc.group(1).strip()} KGS"
+                    if cbm_raw == "N/A":
+                        cbm_raw = f"{tbl_wc.group(2).strip()} CBM"
+
             # Fallback for Checklist: sum item rows `(0001) ... <sets> <pkgs> <weight> <cbm>` if S-TOTAL was cut off
             if is_checklist and (pkgs_raw == "N/A" or weight_raw == "N/A"):
                 item_rows = re.findall(
@@ -440,6 +453,17 @@ def extract_document_containers(full_text: str, is_checklist: bool = False) -> l
                 cand = s_m2.group(1).strip()
                 if not re.match(r"^(?:40HC|40HQ|20GP|40GP|40FT|FCL|LCL|CY|CFS|SEAL|CONT|S-TOTAL|G-TOTAL|DESCRIPTION|HAIPHONG|HANOI|DANANG|VIETNAM)\b", cand, re.I):
                     seal_no = cand
+
+        # 3. OCR shifted-row seal token on the line immediately above the container number (e.g. 'Particulars | TSC0471012\nCAAU6944630 | 40HC...')
+        if seal_no == "N/A" and start > 0:
+            prev_chunk = clean_text[max(0, start - 80):start].rstrip()
+            prev_line = prev_chunk.splitlines()[-1].strip() if prev_chunk else ""
+            if prev_line and not re.search(r"\b[A-Z]{4}\d{7}\b", prev_line):
+                for m_ps in re.finditer(r"\b([A-Z]{2,5}\d{5,10})\b", prev_line):
+                    cand = m_ps.group(1).strip()
+                    if not re.match(r"^(?:40HC|40HQ|20GP|40GP|40FT|FCL|LCL|CY|CFS|SEAL|CONT)\b", cand, re.I):
+                        seal_no = cand
+                        break
 
         t_m = re.search(
             r"((?:20|40|45)[A-Z0-9]{0,3}:[0-9A-Z\s]+?(?=\s+FCL\b|\s+SEAL\b|\s+CY\b|\s+SDD\b|\s{2,}|\s+\d+\s*$|\n|$)|\b(?:20|40|45)(?:\'|\s*ft)?\s*(?:gp|dc|hc|hq|rf|ot|fr|tk|std|dry(?:\s*container)?|general\s*purpose|high\s*cube(?: container)?))",
@@ -650,18 +674,67 @@ def extract_goods_descriptions_comparison(
         bl_all_occurrences.extend(c_descs)
         bl_by_cont.append(f"{cno}: {', '.join(c_descs)}")
 
+    # 4.3b: Fallback for BLs with a dedicated 'DESCRIPTION OF GOODS, MARKS AND NOS' block (no '<N> CARTONS of <Desc>')
+    if not bl_all_occurrences:
+        m_desc_sec = re.search(
+            r"^[ \t]*DESCRIPTION\s+OF\s+GOODS(?:[ \t]*,[ \t]*MARKS\s+(?:AND|&)\s+NOS\.?)?[ \t]*\n(.*?)(?=^[ \t]*(?:SHIPMENT(?:\s+NO)?\s*:|TOTAL\s*:|Container\s+No|===|###)|\Z)",
+            clean_bl,
+            flags=re.I | re.M | re.S,
+        )
+        if m_desc_sec:
+            sec_descs: list[str] = []
+            for raw_ln in m_desc_sec.group(1).splitlines():
+                ln = raw_ln.strip()
+                if not ln:
+                    continue
+                if re.search(
+                    r"^(?:SHIPPER'?S\s+LOAD|SAID\s+TO\s+CONTAIN|N/M$|FCL|CY[\-/]CY|\d[\d,.]*\s*(?:CARTONS?|CTNS?|KGS?|CBM|x\s*\d+)|(?:20|40|45)[\s\']*(?:HC|HQ|GP|HIGH))",
+                    ln,
+                    re.I,
+                ):
+                    continue
+                clean_ln = " ".join(ln.replace("|", " ").split()).strip()
+                if clean_ln and len(clean_ln) >= 3:
+                    sec_descs.append(clean_ln)
+            if sec_descs and any(d in cl_unique for d in sec_descs):
+                bl_all_occurrences.extend(sec_descs)
+                bl_by_cont.append(f"BL: {', '.join(sec_descs)}")
+
     # Fallback for carrier templates (e.g. Yusen Waybill) that list descriptions once above container table
     if not bl_all_occurrences:
-        doc_descs: list[str] = list(bl_data.goods_descriptions) if (bl_data and bl_data.goods_descriptions) else []
-        if not doc_descs:
-            for raw_ln in clean_bl.splitlines():
-                cand = " ".join(raw_ln.split("|")[0].split()).strip()
+        raw_bl_lines = clean_bl.splitlines()
+        doc_descs: list[str] = []
+        i = 0
+        while i < len(raw_bl_lines):
+            parts = [" ".join(p.split()).strip() for p in raw_bl_lines[i].split("|") if p.strip()]
+            matched_desc = ""
+            for cand in parts:
                 if not cand or re.search(r"\b(?:YUSEN\s+LOGISTICS|AS\s+THE\s+CARRIER)\b", cand, re.I):
                     continue
-                if re.match(r"^(?:ACCESSORY\s+FOR\s+|PARTS\s+FOR\s+)[A-Z0-9/\-\s]{4,}$", cand, re.I):
-                    up = cand.upper()
-                    if up not in doc_descs:
-                        doc_descs.append(up)
+                if re.match(
+                    r"^(?:(?:ACCESSORY\s*FOR\s*|PARTS\s*FOR\s*|ACC\s*FOR\s*|MULTI-?FUNCTIONAL\s*)[A-Z0-9/\-\s]{3,}|(?:LASER|LED)\s*PRINTER(?:\s*/[A-Z0-9/\-\s]+)?)$",
+                    cand,
+                    re.I,
+                ):
+                    matched_desc = cand.upper()
+                    break
+            if matched_desc:
+                up = matched_desc
+                # Join wrapped continuation word on the next line (e.g. 'rchant | MACHINE' after 'PARTS FOR FACSIMILE/MULTI-FUNCTIONAL')
+                if i + 1 < len(raw_bl_lines):
+                    nxt_parts = [p.strip() for p in raw_bl_lines[i + 1].split("|") if p.strip()]
+                    nxt_tail = nxt_parts[-1].upper() if nxt_parts else ""
+                    if nxt_tail and (
+                        f"{up} {nxt_tail}" in cl_unique
+                        or re.match(r"^(?:MACHINE|PRINTER|COPIER|FAX|SCANNER)(?:/(?:MACHINE|PRINTER|COPIER|FAX|SCANNER))*$", nxt_tail)
+                    ) and not up.endswith(nxt_tail):
+                        up = f"{up} {nxt_tail}"
+                        i += 1
+                if up not in doc_descs:
+                    doc_descs.append(up)
+            i += 1
+        if not doc_descs and bl_data and bl_data.goods_descriptions:
+            doc_descs = list(bl_data.goods_descriptions)
         if doc_descs:
             bl_all_occurrences.extend(doc_descs)
             bl_by_cont.append(f"Chung cả B/L: {', '.join(doc_descs)}")
@@ -669,10 +742,22 @@ def extract_goods_descriptions_comparison(
     if not bl_all_occurrences:
         return None
 
-    counts = Counter(bl_all_occurrences)
-    missing = [d for d in cl_unique if counts.get(d, 0) == 0]
-    duplicated = [f"{d} (lặp {counts[d]} lần)" for d in cl_unique if counts.get(d, 0) >= 2]
-    extra = [f"{d} ({cnt} lần)" for d, cnt in counts.items() if d not in cl_unique]
+    def _norm_desc(s: str) -> str:
+        return re.sub(r"[^A-Z0-9]", "", s.upper())
+
+    cl_norm_map = {_norm_desc(d): d for d in cl_unique}
+    norm_counts: Counter[str] = Counter()
+    raw_extra_labels: dict[str, str] = {}
+    for d in bl_all_occurrences:
+        nd = _norm_desc(d)
+        norm_counts[nd] += 1
+        if nd not in cl_norm_map and nd not in raw_extra_labels:
+            raw_extra_labels[nd] = d
+
+    counts = {cl_norm_map.get(nd, raw_extra_labels.get(nd, nd)): cnt for nd, cnt in norm_counts.items()}
+    missing = [d for d in cl_unique if norm_counts.get(_norm_desc(d), 0) == 0]
+    duplicated = [f"{d} (lặp {norm_counts[_norm_desc(d)]} lần)" for d in cl_unique if norm_counts.get(_norm_desc(d), 0) >= 2]
+    extra = [f"{raw_extra_labels[nd]} ({cnt} lần)" for nd, cnt in norm_counts.items() if nd not in cl_norm_map]
 
     is_ok = not missing and not duplicated and not extra
     issues: list[str] = []
@@ -922,25 +1007,32 @@ def extract_consignee_comparison(
         # Ignore formatting only; preserve all letters and digits.
         return re.sub(r"[^A-Z0-9]", "", clean_value(value).upper())
 
-    # 1. Checklist: 2D structured field first, then raw block / FORM BOXES fallback.
+    # 1. Checklist: 2D structured field first, with raw-block superset guard (in case 2D box clipped right edge).
     cl_value = clean_value(cl_data.get_value("consignee")) if cl_data else ""
-    if not cl_value:
-        cl_match = re.search(
-            r"^[ \t]*CONSIGNEE\b[^\n]*\n"
-            r"(.*?)"
-            r"(?=^[ \t]*(?:"
-            r"NOTIFY\s*PARTY\b"
-            r"|DELIVERY\s*TO\b"
-            r"|INVOICE\s*NO\b"
-            r"|ORDER\s*NO\b"
-            r"|STUFFING\s*PLAN\b"
-            r"|TTL\b"
-            r"|===|###"
-            r")|\Z)",
-            checklist_text or "",
-            flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    cl_match = re.search(
+        r"^[ \t]*CONSIGNEE\b[^\n]*\n"
+        r"(.*?)"
+        r"(?=^[ \t]*(?:"
+        r"NOTIFY\s*PARTY\b"
+        r"|DELIVERY\s*TO\b"
+        r"|INVOICE\s*NO\b"
+        r"|ORDER\s*NO\b"
+        r"|STUFFING\s*PLAN\b"
+        r"|TTL\b"
+        r"|===|###"
+        r")|\Z)",
+        checklist_text or "",
+        flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    cl_raw_val = clean_value(cl_match.group(1), is_raw_multiline=True) if cl_match else ""
+    if cl_raw_val and (
+        not cl_value
+        or (
+            len(normalize(cl_raw_val)) > len(normalize(cl_value))
+            and normalize(cl_value)[:12] in normalize(cl_raw_val)
         )
-        cl_value = clean_value(cl_match.group(1), is_raw_multiline=True) if cl_match else ""
+    ):
+        cl_value = cl_raw_val
     if not cl_value:
         cl_box_match = re.search(
             r"^[ \t]*-[ \t]*\*\*2\.[ \t]*Consignee\*\*:[ \t]*([^\r\n]*)",
@@ -952,6 +1044,8 @@ def extract_consignee_comparison(
 
     # 2. BL: 2D structured field first, then FORM BOXES / raw OCR layout fallback.
     bl_value = clean_value(bl_data.get_value("consignee")) if bl_data else ""
+    if bl_value:
+        bl_value = re.split(r"\bNOTI[TFV]Y\s*PART", bl_value, maxsplit=1, flags=re.I)[0].strip()
     if not bl_value:
         bl_match = re.search(
             r"^[ \t]*-[ \t]*\*\*2\.[ \t]*Consignee\*\*:"
@@ -984,7 +1078,7 @@ def extract_consignee_comparison(
     # 2b. Resolve '*' overflow/footnote continuation (skip '*Attn:' contact footnotes unless Checklist has ATTN)
     if bl_value and bl_value.rstrip().endswith("*"):
         for m_star in re.finditer(
-            r"^[ \t]*\*([A-Z0-9][^\r\n]*(?:\r?\n[^\r\n]+){0,3})",
+            r"^[ \t]*\*(?!\*)[ \t]*([A-Z0-9][^\r\n]*(?:\r?\n[^\r\n]+){0,3})",
             bl_text or "",
             flags=re.MULTILINE,
         ):
@@ -996,7 +1090,7 @@ def extract_consignee_comparison(
             cont_lines: list[str] = []
             for ln in block.splitlines():
                 s = ln.split("|", 1)[0].strip()
-                if not s or re.match(r"^(?:TOTAL\s*:|PART\s+OF\b|SHIPPER'?S|CONTAINER|===|###)", s, re.I):
+                if not s or s.startswith("*") or re.match(r"^(?:TOTAL\s*:|PART\s+OF\b|SHIPPER'?S|CONTAINER|===|###)", s, re.I):
                     break
                 cont_lines.append(s)
             cont_str = clean_value(" ".join(cont_lines))
@@ -1254,15 +1348,17 @@ def extract_delivery_to_comparison(
 
     # Checklist must always use DELIVERY TO, never the standalone TO field.
     cl_2d_deliv = clean_value(cl_data.get_value("delivery_to")) if cl_data else ""
-    if cl_2d_deliv and has_value(cl_2d_deliv):
-        cl_values = [cl_2d_deliv]
-    else:
-        cl_values = extract_values(checklist_text, "DELIVERY TO")
+    cl_raw_values = extract_values(checklist_text, "DELIVERY TO")
+    cl_combined = ([cl_2d_deliv] if (cl_2d_deliv and has_value(cl_2d_deliv)) else []) + cl_raw_values
+    cl_values = consolidate_candidates(cl_combined)
 
     # Exact field first. Alternatives must be explicitly configured.
     bl_values: list[str] = []
     bl_source = ""
-    bl_2d_deliv = clean_value(bl_data.get_value("delivery_to")) if bl_data else ""
+    bl_2d_raw = bl_data.get_value("delivery_to") if bl_data else ""
+    if bl_2d_raw:
+        bl_2d_raw = re.split(r"(?:^|\s|\|)(?:\*|\bTOTAL\s*:|\bPART\s+OF\b|\bSHIPPER'?S\s+LOAD\b)", bl_2d_raw, maxsplit=1, flags=re.I)[0]
+    bl_2d_deliv = clean_value(bl_2d_raw) if bl_2d_raw else ""
     if bl_2d_deliv and has_value(bl_2d_deliv):
         bl_values = [bl_2d_deliv]
         bl_source = bl_data.fields["delivery_to"].source_label or "DELIVERY TO"
@@ -1596,7 +1692,7 @@ def _extract_bl_notify_parties(
     party1_pattern = re.compile(
         r"^[ \t]*(?:"
         r"FIRST[ \t]*NOTIFY(?:[ \t]*PARTY)?"
-        r"|NOTI[TFV]Y[ \t]*PART(?:Y|IES)"
+        r"|NOTI[TFV]Y[ \t]*PART[VY](?:IES)?"
         r"(?:[ \t]*\([ \t]*1[ \t]*\))?"
         r")"
         r"(?![ \t]*(?:2\b|\([ \t]*2[ \t]*\)))"
@@ -1655,6 +1751,23 @@ def _extract_bl_notify_parties(
 
         block_for_clean = "\n".join(filtered_lines)
         parties[1] = _clean_party_block(block_for_clean)
+
+    if not parties.get(1):
+        m_fb1 = re.search(
+            r"^[ \t]*-[ \t]*\*\*3\.[ \t]*Notify[ \t]*Party\*\*:[ \t]*([^\r\n]+)",
+            unicodedata.normalize("NFKC", text or ""),
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        if m_fb1:
+            fb_raw = re.sub(
+                r"\b(?:[A-Za-z]*forwarding-terms-and-conditions|websiteathttps?://\S+)[^\s|]*",
+                "",
+                m_fb1.group(1),
+                flags=re.IGNORECASE,
+            ).replace("|", "\n")
+            fb_clean = _clean_party_block(fb_raw)
+            if fb_clean:
+                parties[1] = fb_clean
 
     parties.setdefault(1, "")
     parties.setdefault(2, "")
@@ -2580,8 +2693,10 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
             len(cl_conts) == len(bl_conts)
             and cl_tot_pkgs > 0
             and bl_tot_pkgs > 0
-            and cl_cartons_equiv == bl_tot_pkgs
-            and (bl_pkgs_equiv == 0 or bl_pkgs_equiv == cl_tot_pkgs)
+            and (
+                (cl_cartons_equiv > 0 and cl_cartons_equiv == bl_tot_pkgs and (bl_pkgs_equiv == 0 or bl_pkgs_equiv == cl_tot_pkgs))
+                or (bl_pkgs_equiv > 0 and bl_pkgs_equiv == cl_tot_pkgs and (cl_cartons_equiv == 0 or cl_cartons_equiv == bl_tot_pkgs))
+            )
         )
         all_pkgs_ok = (
             len(cl_conts) == len(bl_conts)
@@ -2694,6 +2809,19 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
             m_bl_term = re.search(r"\b(CY\s*[\-/]\s*CY|CY\s*[\-/]\s*DOOR|CFS\s*[\-/]\s*CFS|CFS\s*[\-/]\s*DOOR)\b", bl_text, re.I)
             if m_bl_term:
                 bl_terms = [re.sub(r"\s+", "", m_bl_term.group(1).upper()).replace("/", "-")]
+        if not bl_terms:
+            m_orig = re.search(
+                r"(?:\*\*5\.\s*Place\s*of\s*Receipt\*\*:\s*[^\n]*?|Place\s*of\s*Receipt[^\n|]*?)\b(CY|CFS|DOOR)\b",
+                bl_text,
+                re.I,
+            )
+            m_dest = re.search(
+                r"(?:\*\*9\.\s*Place\s*of\s*Delivery\*\*:\s*[^\n]*?|Place\s*of\s*Delivery[^\n]*\n[^\n]*?)\b(CY|CFS|DOOR)\b",
+                bl_text,
+                re.I,
+            )
+            if m_orig and m_dest:
+                bl_terms = [f"{m_orig.group(1).upper()}-{m_dest.group(1).upper()}"]
         if cl_terms and bl_terms:
             cl_term_norm = cl_terms[0]
             bl_term_norm = bl_terms[0]
@@ -2977,14 +3105,76 @@ def build_shipping_dates_reference_banner(checklist_text: str, bl_text: str) -> 
             f"Cột `Dữ liệu BL` = `{bl_req_val}` => Kết quả bắt buộc: {verdict_22}."
         )
 
+    # 3.5. Item 21: SHIPMENT NO. (REQUEST NO. on Check List vs SHIPMENT / SHIPMENT NO. on BL)
+    cl_ship_no = ""
+    bl_ship_no = ""
+    if cl_data:
+        m_cs = re.search(r"\b(\d{5,10})\b", cl_data.get_value("shipment_no") or "")
+        if m_cs:
+            cl_ship_no = m_cs.group(1)
+    if not cl_ship_no:
+        for pat in (
+            r"\*\*Request No\. / Shipment No\.\*\*:\s*[^\n]*?\b(\d{5,10})\b",
+            r"\bREQUEST\s+NO\.?\s*[:#]?\s*(\d{5,10})\b",
+        ):
+            m_cs = re.search(pat, checklist_text, re.I)
+            if m_cs:
+                cl_ship_no = m_cs.group(1)
+                break
+    if bl_data:
+        m_bs = re.search(r"\b(\d{5,10})\b", bl_data.get_value("shipment_no") or "")
+        if m_bs:
+            bl_ship_no = m_bs.group(1)
+    if not bl_ship_no:
+        for pat in (
+            r"\*\*Request No\. / Shipment No\.\*\*:\s*[^\n]*?\b(\d{5,10})\b",
+            r"\bSHIPMENT(?:\s+NO\.?)?\s*[:#]?\s*(\d{5,10})\b",
+        ):
+            m_bs = re.search(pat, bl_text, re.I)
+            if m_bs:
+                bl_ship_no = m_bs.group(1)
+                break
+    if cl_ship_no or bl_ship_no:
+        if cl_ship_no and bl_ship_no:
+            v_21 = "**ĐÚNG** (Bảng 1)" if cl_ship_no == bl_ship_no else "**SAI** (Bảng 2)"
+        else:
+            v_21 = "**KHÔNG TÌM THẤY** (Bảng 2)"
+        lines.append(
+            f"- Hạng mục 21 (`SHIPMENT NO.` - `REQUEST NO.` vs `SHIPMENT NO.`): "
+            f"Cột `Dữ liệu BL Check List` = `{cl_ship_no or 'Không tìm thấy'}` | "
+            f"Cột `Dữ liệu BL` = `{bl_ship_no or 'Không tìm thấy'}` => Kết quả bắt buộc: {v_21} "
+            f"(không nhầm với Số Bill ở Hạng mục 24)."
+        )
+
+    # 4. Item 23: HS code (BL must NOT display HS code)
+    m_bl_hs = re.search(r"\bH\.?S\.?\s*CODE\s*[:#-]?\s*(\d{4}[\d.\s]{0,8})", bl_text, re.I)
+    if m_bl_hs:
+        lines.append(
+            f"- Hạng mục 23 (`HS code`): Cột `Dữ liệu BL Check List` = `Không yêu cầu hiển thị trên BL` | "
+            f"Cột `Dữ liệu BL` = `Hiển thị HS code ({m_bl_hs.group(1).strip()})` => Kết quả bắt buộc: **SAI** (Bảng 2)."
+        )
+    else:
+        lines.append(
+            "- Hạng mục 23 (`HS code`): Cột `Dữ liệu BL Check List` = `Không yêu cầu hiển thị trên BL` | "
+            "Cột `Dữ liệu BL` = `Không hiển thị` => Kết quả bắt buộc: **ĐÚNG** (Bảng 1)."
+        )
+
     bill_cmp = extract_bill_no_comparison(checklist_text, bl_text, cl_data=cl_data, bl_data=bl_data)
     if bill_cmp["verdict"]:
         cl_b = bill_cmp["checklist_bill"] or "Không tìm thấy"
         bl_b = bill_cmp["bl_bill"] or "Không tìm thấy"
+        bill_detail = ""
+        if bill_cmp["verdict"] == "SAI" and cl_b and bl_b and cl_b != "Không tìm thấy" and bl_b != "Không tìm thấy":
+            if cl_b.upper().startswith(bl_b.upper()):
+                extra_sfx = cl_b[len(bl_b):]
+                bill_detail = f" (Chi tiết: Check List có thêm hậu tố `{extra_sfx}` so với BL)"
+            elif bl_b.upper().startswith(cl_b.upper()):
+                extra_sfx = bl_b[len(cl_b):]
+                bill_detail = f" (Chi tiết: BL có thêm hậu tố `{extra_sfx}` so với Check List)"
         lines.append(
             f"- Hạng mục 24 (`SỐ BILL` - `BILL OF LADING (AIR WAYBILL)` vs `Sea Waybill / B/L No.`): "
             f"Cột `Dữ liệu BL Check List` = `{cl_b}` | Cột `Dữ liệu BL` = `{bl_b}` "
-            f"=> Kết quả bắt buộc: **{bill_cmp['verdict']}** "
+            f"=> Kết quả bắt buộc: **{bill_cmp['verdict']}**{bill_detail} "
             f"(đưa vào Bảng 1 nếu ĐÚNG, Bảng 2 nếu SAI / KHÔNG TÌM THẤY)."
         )
 
@@ -3043,6 +3233,13 @@ def reconcile_compare_counts(md: str) -> str:
         if any(k in res_col for k in ["SAI", "KHÔNG TÌM THẤY", "KHONG TIM THAY", "KHÔNG HIỂU", "KHONG HIEU"]):
             while len(parts) < 8:
                 parts.append("")
+            if not parts[6].strip():
+                if "KHÔNG TÌM THẤY" in res_col or "KHONG TIM THAY" in res_col:
+                    parts[6] = "Thiếu dữ liệu tương ứng trên một trong hai chứng từ; cần kiểm tra lại chứng từ gốc."
+                elif "KHÔNG HIỂU" in res_col or "KHONG HIEU" in res_col:
+                    parts[6] = "Chưa đủ cơ sở xác định một giá trị duy nhất để đối chiếu; cần kiểm tra thủ công."
+                else:
+                    parts[6] = "Dữ liệu giữa BL Check List và BL không khớp; cần kiểm tra và yêu cầu chỉnh sửa B/L."
             clean_t2.append("| " + " | ".join(parts[1:7]) + " |")
         else:
             clean_t1.append(r)
