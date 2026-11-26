@@ -407,6 +407,15 @@ class Retriever:
             logger.error("Keyword search failed: %s", str(e))
             return []
 
+    _LEGAL_SECTION_HEADING_RE = re.compile(
+        r"(?:^|\b›\s*)(?:Điều\s+\d+|Phụ\s+lục\s+[A-Z0-9IVXLC]+|Mục\s+[A-Z0-9IVXLC]+|Chương\s+[A-Z0-9IVXLC]+|Phần\s+(?:thứ\s+)?[A-Z0-9IVXLC]+)",
+        re.IGNORECASE,
+    )
+    _LEGAL_CROSS_REF_RE = re.compile(
+        r"\b(Điều\s+\d+(?:[a-zđ])?|Phụ\s+lục\s+[A-Z0-9IVXLC]+)\b",
+        re.IGNORECASE,
+    )
+
     def _fetch_chunks_by_ids(self, chunk_ids: list[str]) -> dict[str, dict]:
         """Fetch specific chunks by their IDs from PostgreSQL or SQLite for neighbor expansion."""
         if not chunk_ids:
@@ -451,64 +460,331 @@ class Retriever:
 
         return found
 
+    def _fetch_section_chunks(self, document_id: str, heading: str) -> list[dict]:
+        """Fetch all chunks belonging to the same document_id and heading in order."""
+        if not document_id or not heading:
+            return []
+
+        rows: list[dict] = []
+        try:
+            from shared.db import get_db_engine, is_postgres_available
+
+            if is_postgres_available():
+                from sqlalchemy import text
+
+                engine = get_db_engine()
+                with engine.connect() as pg_conn:
+                    stmt = text(
+                        "SELECT id, document_id, filename, page, heading, text "
+                        "FROM document_chunks "
+                        "WHERE document_id = :doc_id AND heading = :heading "
+                        "ORDER BY chunk_index ASC"
+                    )
+                    pg_rows = pg_conn.execute(
+                        stmt, {"doc_id": document_id, "heading": heading}
+                    ).mappings().fetchall()
+                    rows = [dict(r) for r in pg_rows]
+        except Exception as e:
+            logger.debug("PostgreSQL section chunk lookup notice: %s", str(e))
+
+        if not rows:
+            try:
+                conn = get_sqlite_connection()
+                cur = conn.execute(
+                    "SELECT id, document_id, filename, page, heading, text "
+                    "FROM document_chunks "
+                    "WHERE document_id = ? AND heading = ? "
+                    "ORDER BY rowid ASC",
+                    (document_id, heading),
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+                conn.close()
+            except Exception as e:
+                logger.debug("SQLite section chunk lookup notice: %s", str(e))
+
+        rows.sort(key=lambda r: (self._chunk_index_from_id(r.get("id", "")) or 0))
+        return rows
+
+    def _fetch_cross_reference_chunks(
+        self, document_id: str, ref_term: str, limit: int = 6
+    ) -> list[dict]:
+        """Fetch chunks for a referenced section (e.g. 'Điều 12' or 'Phụ lục A') in the same document."""
+        if not document_id or not ref_term:
+            return []
+
+        norm_ref = " ".join(ref_term.split())
+        ref_tail = norm_ref.split()[-1] if norm_ref.split() else norm_ref
+        boundary_re = re.compile(
+            rf"(?:^|›\s*){re.escape(norm_ref)}(?:\b|[:.\s-]|$)",
+            re.IGNORECASE,
+        )
+        candidates: list[dict] = []
+
+        try:
+            from shared.db import get_db_engine, is_postgres_available
+
+            if is_postgres_available():
+                from sqlalchemy import text
+
+                engine = get_db_engine()
+                with engine.connect() as pg_conn:
+                    stmt = text(
+                        "SELECT id, document_id, filename, page, heading, text "
+                        "FROM document_chunks "
+                        "WHERE document_id = :doc_id AND heading ILIKE :pattern "
+                        "ORDER BY chunk_index ASC LIMIT 50"
+                    )
+                    pg_rows = pg_conn.execute(
+                        stmt, {"doc_id": document_id, "pattern": f"%{norm_ref}%"}
+                    ).mappings().fetchall()
+                    candidates = [dict(r) for r in pg_rows]
+        except Exception as e:
+            logger.debug("PostgreSQL cross-ref chunk lookup notice: %s", str(e))
+
+        if not candidates:
+            try:
+                conn = get_sqlite_connection()
+                # SQLite built-in LOWER() is ASCII-only (does not lowercase 'Đ' -> 'đ'),
+                # so pre-filter on the ASCII identifier token and enforce exact match in Python.
+                cur = conn.execute(
+                    "SELECT id, document_id, filename, page, heading, text "
+                    "FROM document_chunks "
+                    "WHERE document_id = ? AND LOWER(heading) LIKE ? "
+                    "ORDER BY rowid ASC LIMIT 50",
+                    (document_id, f"%{ref_tail.lower()}%"),
+                )
+                candidates = [dict(r) for r in cur.fetchall()]
+                conn.close()
+            except Exception as e:
+                logger.debug("SQLite cross-ref chunk lookup notice: %s", str(e))
+
+        matched = [
+            r for r in candidates if boundary_re.search((r.get("heading") or "").strip())
+        ]
+        matched.sort(key=lambda r: (self._chunk_index_from_id(r.get("id", "")) or 0))
+        return matched[:limit]
+
+    @staticmethod
+    def _merge_ordered_chunks(
+        anchor_text: str, ordered_chunks: list[dict], max_chars: int
+    ) -> tuple[str, list[str]]:
+        """Merge ordered section chunks into a single coherent text up to max_chars."""
+        if not ordered_chunks:
+            return anchor_text, []
+
+        merged_parts: list[str] = []
+        merged_ids: list[str] = []
+        total_len = 0
+
+        for i, row in enumerate(ordered_chunks):
+            raw = (row.get("text") or "").strip()
+            if not raw:
+                continue
+            part = raw if i == 0 else _CONTEXT_HEADER_PREFIX_RE.sub("", raw).strip()
+            if not part:
+                continue
+            added_len = len(part) + (1 if merged_parts else 0)
+            if merged_parts and total_len + added_len > max_chars:
+                break
+            merged_parts.append(part)
+            total_len += added_len
+            if row.get("id"):
+                merged_ids.append(row["id"])
+
+        if not merged_parts:
+            return anchor_text, []
+        return "\n".join(merged_parts), merged_ids
+
     def _expand_neighbor_chunks(
         self,
         top_chunks: list[dict],
-        max_expand_count: int = 2,
-        max_combined_chars: int = 2600,
+        max_expand_count: int = 3,
+        max_combined_chars: int = 3000,
+        max_article_chars: int = 4500,
     ) -> list[dict]:
-        """Expand the highest-ranked chunks with their immediate next chunk (chunk_index + 1)
-        when they belong to the same document/section and were not already retrieved.
+        """Expand top chunks using Parent-Article Expansion for legal/policy sections,
+        and ±1 neighbor window expansion for general narrative chunks.
         """
         if not top_chunks:
             return top_chunks
 
-        existing_ids = {c.get("id") for c in top_chunks}
-        candidate_map: dict[int, str] = {}
+        existing_ids = {c.get("id") for c in top_chunks if c.get("id")}
+        absorbed_ids: set[str] = set()
+        expanded_sections: set[tuple[str, str]] = set()
+        neighbor_candidates: dict[int, list[str]] = {}
 
         for idx, chunk in enumerate(top_chunks[:max_expand_count]):
+            cid = chunk.get("id")
+            if cid and cid in absorbed_ids:
+                continue
+
             meta = chunk.get("metadata") or {}
-            # Do not expand Excel summary chunks
             if meta.get("is_summary"):
                 continue
+
             doc_id = meta.get("document_id")
+            heading = (meta.get("heading") or "").strip()
+
+            # 1. Parent-Article Expansion for legal / structured policy sections
+            if doc_id and heading and self._LEGAL_SECTION_HEADING_RE.search(heading):
+                sec_key = (doc_id, heading)
+                if sec_key not in expanded_sections:
+                    section_rows = self._fetch_section_chunks(doc_id, heading)
+                    if len(section_rows) > 1:
+                        merged_text, merged_ids = self._merge_ordered_chunks(
+                            chunk.get("text", ""), section_rows, max_article_chars
+                        )
+                        if len(merged_text) > len(chunk.get("text", "")):
+                            chunk["text"] = merged_text
+                            expanded_sections.add(sec_key)
+                            for mid in merged_ids:
+                                if mid != cid:
+                                    absorbed_ids.add(mid)
+                            continue
+
+            # 2. Fallback: ±1 neighbor window for general chunks or single-chunk sections
             c_idx = meta.get("chunk_index")
             if c_idx is None:
-                c_idx = self._chunk_index_from_id(chunk.get("id", ""))
+                c_idx = self._chunk_index_from_id(cid or "")
             if doc_id and c_idx is not None:
+                cand_ids = []
+                if c_idx > 0:
+                    prev_id = f"{doc_id}_chunk_{c_idx - 1}"
+                    if prev_id not in existing_ids and prev_id not in absorbed_ids:
+                        cand_ids.append(prev_id)
                 next_id = f"{doc_id}_chunk_{c_idx + 1}"
-                if next_id not in existing_ids:
-                    candidate_map[idx] = next_id
+                if next_id not in existing_ids and next_id not in absorbed_ids:
+                    cand_ids.append(next_id)
+                if cand_ids:
+                    neighbor_candidates[idx] = cand_ids
 
-        if not candidate_map:
+        if neighbor_candidates:
+            all_needed = [nid for nids in neighbor_candidates.values() for nid in nids]
+            fetched = self._fetch_chunks_by_ids(all_needed)
+            if fetched:
+                for idx, cand_ids in neighbor_candidates.items():
+                    parent = top_chunks[idx]
+                    parent_meta = parent.get("metadata") or {}
+                    parent_page = parent_meta.get("page")
+                    cur_text = parent.get("text", "")
+                    c_idx = parent_meta.get("chunk_index")
+                    if c_idx is None:
+                        c_idx = self._chunk_index_from_id(parent.get("id", ""))
+                    doc_id = parent_meta.get("document_id")
+
+                    for nid in cand_ids:
+                        neighbor = fetched.get(nid)
+                        if not neighbor:
+                            continue
+                        neighbor_page = neighbor.get("page")
+                        if parent_page and neighbor_page and abs(int(neighbor_page) - int(parent_page)) > 1:
+                            continue
+                        neighbor_body = _CONTEXT_HEADER_PREFIX_RE.sub("", neighbor.get("text", "")).strip()
+                        if not neighbor_body:
+                            continue
+                        if len(cur_text) + len(neighbor_body) + 1 > max_combined_chars:
+                            continue
+                        is_prev = doc_id and c_idx is not None and nid == f"{doc_id}_chunk_{c_idx - 1}"
+                        if is_prev:
+                            header_match = _CONTEXT_HEADER_PREFIX_RE.match(cur_text)
+                            if header_match:
+                                header = header_match.group(0).strip()
+                                body = cur_text[header_match.end():].strip()
+                                cur_text = f"{header}\n{neighbor_body}\n{body}"
+                            else:
+                                cur_text = f"{neighbor_body}\n{cur_text}"
+                        else:
+                            cur_text = f"{cur_text}\n{neighbor_body}"
+                    parent["text"] = cur_text
+
+        if not absorbed_ids:
             return top_chunks
+        return [c for c in top_chunks if c.get("id") not in absorbed_ids]
 
-        fetched = self._fetch_chunks_by_ids(list(candidate_map.values()))
-        if not fetched:
-            return top_chunks
+    def _expand_legal_cross_references(
+        self,
+        chunks: list[dict],
+        max_refs: int = 3,
+        max_ref_chars: int = 2500,
+    ) -> list[dict]:
+        """Detect cross-references (e.g. 'Điều 12', 'Phụ lục A') in top chunks and append
+        missing referenced sections from the same document.
+        """
+        if not chunks:
+            return chunks
 
-        for idx, next_id in candidate_map.items():
-            neighbor = fetched.get(next_id)
-            if not neighbor:
+        existing_headings_by_doc: dict[str, list[str]] = {}
+        for c in chunks:
+            meta = c.get("metadata") or {}
+            d_id = meta.get("document_id")
+            h = (meta.get("heading") or "").strip()
+            if d_id and h:
+                existing_headings_by_doc.setdefault(d_id, []).append(h)
+
+        added_refs: list[dict] = []
+        seen_ref_keys: set[tuple[str, str]] = set()
+
+        for c in chunks[:3]:
+            if len(added_refs) >= max_refs:
+                break
+            meta = c.get("metadata") or {}
+            doc_id = meta.get("document_id")
+            if not doc_id or meta.get("is_summary"):
                 continue
-            parent = top_chunks[idx]
-            parent_meta = parent.get("metadata") or {}
-            parent_page = parent_meta.get("page")
-            neighbor_page = neighbor.get("page")
 
-            # Expand only if on the same page or adjacent page with matching/continuation content
-            if parent_page and neighbor_page and abs(int(neighbor_page) - int(parent_page)) > 1:
-                continue
+            text_body = c.get("text") or ""
+            for match in self._LEGAL_CROSS_REF_RE.finditer(text_body):
+                if len(added_refs) >= max_refs:
+                    break
+                norm_ref = " ".join(match.group(1).split())
+                ref_key = (doc_id, norm_ref.lower())
+                if ref_key in seen_ref_keys:
+                    continue
 
-            neighbor_body = _CONTEXT_HEADER_PREFIX_RE.sub("", neighbor.get("text", "")).strip()
-            if not neighbor_body:
-                continue
+                # Skip if already present in retrieved chunks for this document
+                boundary_re = re.compile(
+                    rf"(?:^|›\s*){re.escape(norm_ref)}(?:\b|[:.\s-]|$)",
+                    re.IGNORECASE,
+                )
+                already_present = any(
+                    boundary_re.search(h) for h in existing_headings_by_doc.get(doc_id, [])
+                )
+                if already_present:
+                    seen_ref_keys.add(ref_key)
+                    continue
 
-            cur_text = parent.get("text", "")
-            if len(cur_text) + len(neighbor_body) <= max_combined_chars:
-                parent["text"] = f"{cur_text}\n{neighbor_body}"
+                ref_rows = self._fetch_cross_reference_chunks(doc_id, norm_ref)
+                seen_ref_keys.add(ref_key)
+                if not ref_rows:
+                    continue
 
-        return top_chunks
+                first_row = ref_rows[0]
+                ref_heading = (first_row.get("heading") or norm_ref).strip()
+                merged_text, _ = self._merge_ordered_chunks(
+                    first_row.get("text", ""), ref_rows, max_ref_chars
+                )
+                if not merged_text:
+                    continue
+
+                existing_headings_by_doc.setdefault(doc_id, []).append(ref_heading)
+                source_score = float(c.get("score") or 0.5)
+                added_refs.append({
+                    "id": first_row.get("id", f"{doc_id}_ref_{norm_ref}"),
+                    "text": merged_text,
+                    "score": round(source_score * 0.85, 4),
+                    "metadata": {
+                        "document_id": doc_id,
+                        "filename": first_row.get("filename") or meta.get("filename", ""),
+                        "page": first_row.get("page") or meta.get("page", 1),
+                        "heading": ref_heading,
+                        "is_cross_reference": True,
+                        "referenced_from": meta.get("heading") or "",
+                    },
+                })
+
+        if not added_refs:
+            return chunks
+        return chunks + added_refs
 
     async def search(
         self,
@@ -569,10 +845,13 @@ class Retriever:
                 chunk["score"] = round(rrf_score, 4)
                 final_results.append(chunk)
 
-            # 5. Neighboring chunk expansion for top results
+            # 5. Neighboring / Parent-Article expansion & Legal Cross-Reference Hop
             if final_results:
                 final_results = await asyncio.to_thread(
                     self._expand_neighbor_chunks, final_results
+                )
+                final_results = await asyncio.to_thread(
+                    self._expand_legal_cross_references, final_results
                 )
 
             logger.debug(

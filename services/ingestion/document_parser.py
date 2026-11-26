@@ -50,30 +50,56 @@ def _parse_pdf(file_path: str) -> Generator[str, None, None]:
         raise
 
 
+def _format_docx_table_markdown(table) -> str:
+    """Convert a python-docx Table into a clean Markdown table."""
+    rows_data: list[list[str]] = []
+    for row in table.rows:
+        cells = [" ".join((cell.text or "").split()).replace("|", "\\|").strip() for cell in row.cells]
+        if any(cells):
+            rows_data.append(cells)
+    if not rows_data:
+        return ""
+    width = max(len(r) for r in rows_data)
+    padded = [r + [""] * (width - len(r)) for r in rows_data]
+    if len(padded) == 1:
+        return "| " + " | ".join(padded[0]) + " |"
+    header = "| " + " | ".join(padded[0]) + " |"
+    sep = "|" + "---|" * width
+    body = ["| " + " | ".join(r) + " |" for r in padded[1:]]
+    return "\n".join([header, sep] + body)
+
+
 def _parse_docx(file_path: str) -> Generator[str, None, None]:
-    """Parse DOCX using python-docx. Yields paragraphs and tables."""
+    """Parse DOCX using python-docx, preserving the exact inline order of paragraphs and tables."""
     from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
 
     try:
         doc = Document(file_path)
+        blocks: list[str] = []
 
-        # Extract paragraphs
-        paragraphs = []
-        for para in doc.paragraphs:
-            if para.text and para.text.strip():
-                paragraphs.append(para.text.strip())
+        if hasattr(doc, "iter_inner_content"):
+            for item in doc.iter_inner_content():
+                if isinstance(item, Paragraph):
+                    txt = (item.text or "").strip()
+                    if txt:
+                        blocks.append(txt)
+                elif isinstance(item, Table):
+                    md_tbl = _format_docx_table_markdown(item)
+                    if md_tbl:
+                        blocks.append(md_tbl)
+        else:
+            for para in doc.paragraphs:
+                if para.text and para.text.strip():
+                    blocks.append(para.text.strip())
+            for table_idx, table in enumerate(doc.tables):
+                md_tbl = _format_docx_table_markdown(table)
+                if md_tbl:
+                    blocks.append(f"[Table {table_idx + 1}]\n{md_tbl}")
 
-        if paragraphs:
-            yield "\n".join(paragraphs)
-
-        # Extract tables
-        for table_idx, table in enumerate(doc.tables):
-            table_text_lines = []
-            for row in table.rows:
-                row_data = [cell.text.strip() for cell in row.cells]
-                table_text_lines.append(" | ".join(row_data))
-            if table_text_lines:
-                yield f"[Table {table_idx + 1}]\n" + "\n".join(table_text_lines)
+        if blocks:
+            yield "\n\n".join(blocks)
 
     except Exception as e:
         logger.error("Failed to parse DOCX %s: %s", file_path, str(e))

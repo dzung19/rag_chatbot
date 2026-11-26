@@ -1,11 +1,10 @@
 """Text chunking for document ingestion.
 
-Implements Strategy 5+ (Hybrid: Hierarchical Structure-Aware Splitting +
-Table-Header Preservation + Contextual Breadcrumb Headers).
-Detects multi-level document structural boundaries (chapters, articles, sections,
-markdown headings, slides, sheets, tables) and prepends hierarchical breadcrumb
-headers to every chunk, while keeping Markdown/pipe tables intact with repeated
-column headers across sub-chunks.
+Implements Strategy 6 (Legal & Policy Structure-Aware Splitting + Cross-Page Streaming +
+Clause-Boundary & Lead-in Preservation + Table-Header Preservation + Contextual Breadcrumbs).
+Detects 5-level legal/policy hierarchy (Phần › Chương › Mục/Phụ lục › Tiểu mục › Điều),
+keeps numbered clauses (1., 2., a), b)) intact inside their parent Điều across page breaks,
+and prepends hierarchical breadcrumb headers to every chunk.
 """
 
 from __future__ import annotations
@@ -21,28 +20,45 @@ logger = logging.getLogger(__name__)
 # Page boundary banner emitted by pdf_parser.py (e.g. "=== TRANG 1/5 ===")
 _PAGE_BANNER_RE = re.compile(r"^===\s*TRANG\s+\d+(?:\s*/\s*\d+)?\s*===$", re.IGNORECASE)
 
+# Hidden structured JSON block emitted by pdf_parser.py for B/L comparison
+_STRUCTURED_JSON_BLOCK_RE = re.compile(
+    r"\n*### \[STRUCTURED_SHIPPING_DATA_JSON\]\s*\n.*?\n### \[/STRUCTURED_SHIPPING_DATA_JSON\]\s*",
+    re.DOTALL,
+)
+
 # Markdown table separator line (e.g. "|---|---|---|" or "| :--- | ---: |")
 _MD_TABLE_SEP_RE = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?$")
 
-# Heading & structural boundary patterns mapped to hierarchy levels (1 = highest, 4 = lowest)
+# Legal clause boundary markers inside an Article (Điều)
+_CLAUSE_START_RE = re.compile(
+    r"^(?:Khoản\s+\d+\b|\d+(?:\.\d+)*\.\s+\S|[a-zđ]\)\s+\S|[-•]\s+\S)",
+    re.IGNORECASE,
+)
+
+# 5-level structural hierarchy for Vietnamese Legal / Corporate Policy / Markdown docs:
+# Level 1: Phần / # H1
+# Level 2: Chương / Roman numeral (I., II.) / ## H2
+# Level 3: Mục / Phụ lục / [Slide/Sheet] / ### H3
+# Level 4: Tiểu mục / #### H4-H6 / [Table/Notes]
+# Level 5: Điều (e.g. Điều 12. ...)
 LEVEL_HEADING_PATTERNS: list[tuple[int, re.Pattern[str]]] = [
-    # Level 1: Top-level chapters / parts / H1 / Roman numerals
+    # Level 1: Parts / H1
     (1, re.compile(r"^#\s+.+")),
-    (1, re.compile(r"^(?:Phần|Chương|PHẦN|CHƯƠNG)\s+[IVXLCDM\d]+\b.*", re.IGNORECASE)),
-    (1, re.compile(r"^[IVXLCDM]+\.\s+\S.+")),
-    # Level 2: Articles / Sections / H2 / Top-level numbered sections (1. Intro)
+    (1, re.compile(r"^(?:Phần|PHẦN)\s+[IVXLCDM\d]+\b.*")),
+    # Level 2: Chapters / Roman numerals / H2
     (2, re.compile(r"^##\s+.+")),
-    (2, re.compile(r"^(?:Mục|Điều|Phụ lục|MỤC|ĐIỀU|PHỤ LỤC)\s+[IVXLCDM\d]+\b.*", re.IGNORECASE)),
-    (2, re.compile(r"^\d+\.\s+\S.+")),
-    (2, re.compile(r"^\[(?:Slide|Sheet)\s*.*\]$", re.IGNORECASE)),
-    # Level 3: Sub-sections / H3 / 1.1 Scope / Parser section tags
+    (2, re.compile(r"^(?:Chương|CHƯƠNG)\s+[IVXLCDM\d]+\b.*")),
+    (2, re.compile(r"^[IVXLCDM]+\.\s+\S.+")),
+    # Level 3: Sections / Appendices / Slides / Sheets / H3
     (3, re.compile(r"^###\s+.+")),
-    (3, re.compile(r"^(?:Khoản|Bảng|Hình)\s+\d+\b.*", re.IGNORECASE)),
-    (3, re.compile(r"^\d+\.\d+\.?\s+\S.+")),
-    (3, re.compile(r"^\[(?:Table|Notes)\s*.*\]$", re.IGNORECASE)),
-    # Level 4: Deep sub-sections / H4-H6 / 1.1.1
+    (3, re.compile(r"^(?:Mục|Phụ lục|MỤC|PHỤ LỤC)\s+[IVXLCDM\dA-Z]+\b.*")),
+    (3, re.compile(r"^\[(?:Slide|Sheet)\s*.*\]$", re.IGNORECASE)),
+    # Level 4: Sub-sections / H4-H6 / Tables
     (4, re.compile(r"^#{4,6}\s+.+")),
-    (4, re.compile(r"^\d+\.\d+\.\d+(?:\.\d+)*\.?\s+\S.+")),
+    (4, re.compile(r"^(?:Tiểu\s+mục|TIỂU\s+MỤC|Bảng|Hình)\s+[IVXLCDM\d]+\b.*")),
+    (4, re.compile(r"^\[(?:Table|Notes)\s*.*\]$", re.IGNORECASE)),
+    # Level 5: Legal Articles (Điều X)
+    (5, re.compile(r"^(?:Điều|ĐIỀU)\s+\d+[a-zA-Z]?(?:[.:]\s*\S.*|\s+[^\s].*|\s*$)")),
 ]
 
 # Legacy flat pattern list kept for backward compatibility
@@ -64,13 +80,13 @@ def _is_table_line(line: str) -> bool:
     return False
 
 
-def _get_heading_level(line: str) -> Optional[int]:
-    """Return hierarchy level (1..4) if `line` is a structural heading, else None."""
+def _get_heading_level(line: str, *, in_article: bool = False) -> Optional[int]:
+    """Return hierarchy level (1..5) if `line` is a structural heading, else None."""
     stripped = line.strip()
     if not stripped or len(stripped) > 160:
         return None
     if _PAGE_BANNER_RE.match(stripped):
-        return 0  # Special level 0: page banner marker (ignored in breadcrumb to avoid duplicating page_number)
+        return 0  # Special level 0: page banner marker
     if _is_table_line(stripped) or " | " in stripped:
         return None
 
@@ -78,10 +94,14 @@ def _get_heading_level(line: str) -> Optional[int]:
         if pattern.match(stripped):
             return level
 
-    # Short all-caps lines (common in Vietnamese policies/announcements) -> Level 2
+    # Numbered ALL-CAPS section title (e.g. "1. QUY ĐỊNH CHUNG") only outside an Article
+    if not in_article and re.match(r"^\d+(?:\.\d+)*\.?\s+[A-ZÀ-Ỹ0-9\s\-/()]{3,80}$", stripped):
+        if stripped.isupper() and not stripped.endswith("."):
+            return 3 if "." in stripped.split()[0].rstrip(".") else 2
+
+    # Short all-caps lines (common in Vietnamese policies/announcements) -> Level 2 (or 4 inside article? keep outside)
     words = stripped.split()
-    if 2 <= len(words) <= 10 and stripped.isupper() and not any(c in stripped for c in [",", ";", ".", ":"]):
-        # Avoid treating container numbers or HS codes as headings
+    if not in_article and 2 <= len(words) <= 10 and stripped.isupper() and not any(c in stripped for c in [",", ";", ".", ":"]):
         if not re.search(r"\b(?:[A-Z]{4}\d{7}|HS\s+CODE|INVOICE\s+NO)\b", stripped):
             return 2
 
@@ -103,12 +123,12 @@ def _clean_heading_text(raw_heading: str) -> str:
     return s
 
 
-def _detect_sections(text: str) -> list[dict]:
-    """Split text into structural sections while maintaining a multi-level heading breadcrumb."""
-    lines = text.split("\n")
+def _detect_sections_from_line_stream(line_pages: list[tuple[str, int]]) -> list[dict]:
+    """Split a stream of (line, page_number) pairs into structural sections across pages."""
     sections: list[dict] = []
     heading_stack: dict[int, str] = {}
-    current_lines: list[str] = []
+    current_lines: list[tuple[str, int]] = []
+    pending_empty_heading: Optional[tuple[str, Optional[str], int]] = None
 
     def current_breadcrumb() -> Optional[str]:
         if not heading_stack:
@@ -117,35 +137,83 @@ def _detect_sections(text: str) -> list[dict]:
         return " › ".join(ordered) if ordered else None
 
     def flush_section() -> None:
-        nonlocal current_lines
+        nonlocal current_lines, pending_empty_heading
         if current_lines:
-            body = "\n".join(current_lines).strip()
+            body = "\n".join(ln for ln, _ in current_lines).strip()
             if body:
-                sections.append({"heading": current_breadcrumb(), "body": body})
+                pages_in_sec = [p for _, p in current_lines if p > 0]
+                start_page = pages_in_sec[0] if pages_in_sec else 0
+                sections.append(
+                    {
+                        "heading": current_breadcrumb(),
+                        "body": body,
+                        "page": start_page,
+                        "line_pages": list(current_lines),
+                    }
+                )
+            pending_empty_heading = None
         current_lines = []
 
-    for line in lines:
-        lvl = _get_heading_level(line)
+    for line, page_num in line_pages:
+        in_article = 5 in heading_stack
+        lvl = _get_heading_level(line, in_article=in_article)
         if lvl == 0:
-            # Page banner ("=== TRANG X/Y ==="): keep as a lightweight marker or skip without resetting stack
             continue
         if lvl is not None and lvl > 0:
-            flush_section()
+            if current_lines:
+                flush_section()
+            elif pending_empty_heading is not None:
+                prev_raw, prev_bc, prev_page = pending_empty_heading
+                # Preserve standalone heading that had no body before a sibling/higher heading
+                prev_lvl = _get_heading_level(prev_raw, in_article=False) or 5
+                if lvl <= prev_lvl:
+                    sections.append(
+                        {
+                            "heading": prev_bc,
+                            "body": prev_raw,
+                            "page": prev_page,
+                            "line_pages": [(prev_raw, prev_page)],
+                        }
+                    )
+
             cleaned_h = _clean_heading_text(line)
-            # Clear deeper or equal levels in the breadcrumb stack
             for existing_lvl in list(heading_stack.keys()):
                 if existing_lvl >= lvl:
                     del heading_stack[existing_lvl]
             heading_stack[lvl] = cleaned_h
+            pending_empty_heading = (line.strip(), current_breadcrumb(), page_num)
         else:
-            current_lines.append(line)
+            if line.strip() or current_lines:
+                pending_empty_heading = None
+                current_lines.append((line, page_num))
 
     flush_section()
-    return sections if sections else [{"heading": None, "body": text.strip()}]
+    if pending_empty_heading is not None:
+        prev_raw, prev_bc, prev_page = pending_empty_heading
+        sections.append(
+            {
+                "heading": prev_bc,
+                "body": prev_raw,
+                "page": prev_page,
+                "line_pages": [(prev_raw, prev_page)],
+            }
+        )
+
+    if not sections:
+        full_body = "\n".join(ln for ln, _ in line_pages).strip()
+        first_p = next((p for _, p in line_pages if p > 0), 0)
+        return [{"heading": None, "body": full_body, "page": first_p, "line_pages": line_pages}] if full_body else []
+    return sections
+
+
+def _detect_sections(text: str) -> list[dict]:
+    """Split text into structural sections while maintaining a multi-level heading breadcrumb."""
+    line_pages = [(ln, 0) for ln in text.split("\n")]
+    return _detect_sections_from_line_stream(line_pages)
 
 
 # ---------------------------------------------------------------------------
-# Table-Aware Section Splitting
+# Table-Aware & Clause-Aware Section Splitting
 # ---------------------------------------------------------------------------
 
 
@@ -164,7 +232,6 @@ def _segment_body_into_prose_and_tables(body: str) -> list[tuple[str, list[str]]
         elif line_type == cur_type:
             cur_lines.append(line)
         else:
-            # A table must have at least 2 lines; otherwise treat single pipe line as prose
             if cur_type == "table" and len(cur_lines) < 2:
                 if blocks and blocks[-1][0] == "prose":
                     blocks[-1][1].extend(cur_lines)
@@ -204,7 +271,6 @@ def _chunk_single_table(
     elif len(full_table) <= chunk_size:
         return [full_table]
 
-    # Identify header rows (1 row for simple pipe tables, 2 rows if row 2 is |---|---|)
     if len(table_lines) >= 2 and _MD_TABLE_SEP_RE.match(table_lines[1].strip()):
         header_lines = table_lines[:2]
         data_rows = table_lines[2:]
@@ -230,7 +296,6 @@ def _chunk_single_table(
         row_len = len(row) + 1
         if cur_rows and (cur_len + row_len > row_budget):
             table_chunks.append(f"{header_str}\n" + "\n".join(cur_rows))
-            # Keep 1 row overlap for continuity when table has many rows
             overlap_row = cur_rows[-1]
             if len(overlap_row) + 1 + row_len <= row_budget and len(cur_rows) >= 2:
                 cur_rows = [overlap_row, row]
@@ -248,20 +313,89 @@ def _chunk_single_table(
     return table_chunks
 
 
+def _split_prose_with_clauses(
+    prose_text: str,
+    chunk_size: int,
+    splitter: RecursiveCharacterTextSplitter,
+) -> list[str]:
+    """Split long legal/policy prose along clause boundaries (1., 2., a), b)) and preserve lead-in context."""
+    if len(prose_text) <= chunk_size:
+        return [prose_text]
+
+    lines = prose_text.split("\n")
+    clause_blocks: list[str] = []
+    cur_block: list[str] = []
+
+    for ln in lines:
+        if cur_block and _CLAUSE_START_RE.match(ln.strip()):
+            clause_blocks.append("\n".join(cur_block).strip())
+            cur_block = [ln]
+        else:
+            cur_block.append(ln)
+    if cur_block:
+        clause_blocks.append("\n".join(cur_block).strip())
+    clause_blocks = [b for b in clause_blocks if b]
+
+    # If no clause structure found, fall back to recursive splitter
+    if len(clause_blocks) <= 1:
+        return [c.strip() for c in splitter.split_text(prose_text) if c and c.strip()]
+
+    # Detect short introductory lead-in before the first numbered clause
+    lead_in = ""
+    if not _CLAUSE_START_RE.match(clause_blocks[0].lstrip()) and len(clause_blocks[0]) <= 250:
+        lead_in = clause_blocks[0]
+
+    chunks: list[str] = []
+    cur_parts: list[str] = []
+    cur_len = 0
+
+    def flush_parts() -> None:
+        nonlocal cur_parts, cur_len
+        if not cur_parts:
+            return
+        text_out = "\n".join(cur_parts).strip()
+        if chunks and lead_in and not text_out.startswith(lead_in):
+            text_out = f"[Dẫn nhập: {lead_in}]\n{text_out}"
+        chunks.append(text_out)
+        cur_parts = []
+        cur_len = 0
+
+    lead_overhead = (len(lead_in) + 16) if lead_in else 0
+    for blk in clause_blocks:
+        if len(blk) > chunk_size:
+            flush_parts()
+            sub_pieces = [c.strip() for c in splitter.split_text(blk) if c and c.strip()]
+            for sp in sub_pieces:
+                if chunks and lead_in and not sp.startswith(lead_in):
+                    chunks.append(f"[Dẫn nhập: {lead_in}]\n{sp}")
+                else:
+                    chunks.append(sp)
+            continue
+
+        effective_limit = chunk_size - (lead_overhead if chunks else 0)
+        blk_len = len(blk) + 1
+        if cur_parts and (cur_len + blk_len > max(250, effective_limit)):
+            flush_parts()
+        cur_parts.append(blk)
+        cur_len += blk_len
+
+    flush_parts()
+    return [c for c in chunks if c and c.strip()]
+
+
 def _split_section_body(
     body: str,
     chunk_size: int,
     chunk_overlap: int,
     splitter: RecursiveCharacterTextSplitter,
 ) -> list[str]:
-    """Split a section body into sub-chunks, preserving table headers and row integrity."""
+    """Split a section body into sub-chunks, preserving clause boundaries, table headers, and row integrity."""
     if len(body) <= chunk_size:
         return [body]
 
     blocks = _segment_body_into_prose_and_tables(body)
-    # Fast path if no tables exist in this section
     if all(b_type == "prose" for b_type, _ in blocks):
-        return [c.strip() for c in splitter.split_text(body) if c and c.strip()]
+        return _split_prose_with_clauses(body, chunk_size=chunk_size, splitter=splitter)
 
     sub_chunks: list[str] = []
     pending_prose: list[str] = []
@@ -274,16 +408,12 @@ def _split_section_body(
         pending_prose = []
         if not prose_text:
             return
-        if len(prose_text) <= chunk_size:
-            sub_chunks.append(prose_text)
-        else:
-            sub_chunks.extend(c.strip() for c in splitter.split_text(prose_text) if c and c.strip())
+        sub_chunks.extend(_split_prose_with_clauses(prose_text, chunk_size=chunk_size, splitter=splitter))
 
     for b_type, b_lines in blocks:
         if b_type == "prose":
             pending_prose.extend(b_lines)
         else:
-            # Table block: check if trailing short prose line is a caption/intro for this table
             intro_line = ""
             if pending_prose:
                 non_empty_prose = [ln for ln in pending_prose if ln.strip()]
@@ -294,7 +424,6 @@ def _split_section_body(
                     flush_prose()
 
             t_chunks = _chunk_single_table(b_lines, chunk_size=chunk_size, intro_line=intro_line)
-            # If the table is small and can merge with the previous prose chunk, merge them
             if (
                 len(t_chunks) == 1
                 and sub_chunks
@@ -313,32 +442,15 @@ def _split_section_body(
 # ---------------------------------------------------------------------------
 
 
-def chunk_text(
-    text: str,
-    chunk_size: int = 1000,
-    chunk_overlap: int = 200,
-    page_number: int = 0,
-    source_filename: str = "",
-    start_chunk_index: int = 0,
+def _build_chunks_from_sections(
+    sections: list[dict],
+    chunk_size: int,
+    chunk_overlap: int,
+    source_filename: str,
+    start_chunk_index: int,
+    default_page: int = 0,
 ) -> list[dict]:
-    """Split text into structure-aware chunks with hierarchical contextual headers.
-
-    Args:
-        text: Page or section text content.
-        chunk_size: Maximum characters per chunk (content portion).
-        chunk_overlap: Character overlap between consecutive prose sub-chunks.
-        page_number: Document page, slide, or sheet number (1-based if known).
-        source_filename: Original document filename for context attribution.
-        start_chunk_index: Starting index for global chunk numbering.
-
-    Returns:
-        List of dicts with 'text', 'raw_text', 'chunk_index', 'page', 'heading',
-        'source', and 'context_header'.
-    """
-    if not text or not text.strip():
-        return []
-
-    sections = _detect_sections(text)
+    """Convert detected structural sections into contextualized chunks."""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -347,19 +459,19 @@ def chunk_text(
         is_separator_regex=False,
     )
 
-    result = []
+    result: list[dict] = []
     chunk_idx = start_chunk_index
 
     for section in sections:
         heading = section["heading"]
         body = section["body"]
+        sec_page = section.get("page") or default_page
 
-        # Build contextual header prefix with full breadcrumb
         header_parts = []
         if source_filename:
             header_parts.append(f"Nguồn: {source_filename}")
-        if page_number > 0:
-            header_parts.append(f"Trang {page_number}")
+        if sec_page > 0:
+            header_parts.append(f"Trang {sec_page}")
         if heading:
             header_parts.append(f"Mục: {heading}")
 
@@ -379,13 +491,43 @@ def chunk_text(
                         "text": (context_header + sub_text).strip(),
                         "raw_text": sub_text.strip(),
                         "chunk_index": chunk_idx,
-                        "page": page_number,
+                        "page": sec_page,
                         "heading": heading or "",
                         "source": source_filename,
                         "context_header": context_header.strip(),
                     }
                 )
                 chunk_idx += 1
+
+    return result
+
+
+def chunk_text(
+    text: str,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 200,
+    page_number: int = 0,
+    source_filename: str = "",
+    start_chunk_index: int = 0,
+) -> list[dict]:
+    """Split text into structure-aware chunks with hierarchical contextual headers."""
+    if not text or not text.strip():
+        return []
+
+    clean_text = _STRUCTURED_JSON_BLOCK_RE.sub("\n", text).strip()
+    if not clean_text:
+        return []
+
+    line_pages = [(ln, page_number) for ln in clean_text.split("\n")]
+    sections = _detect_sections_from_line_stream(line_pages)
+    result = _build_chunks_from_sections(
+        sections=sections,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        source_filename=source_filename,
+        start_chunk_index=start_chunk_index,
+        default_page=page_number,
+    )
 
     logger.debug(
         "Chunked text into %d chunks (sections=%d, page=%d, size=%d, overlap=%d)",
@@ -404,38 +546,38 @@ def chunk_document_pages(
     chunk_overlap: int = 200,
     source_filename: str = "",
 ) -> list[dict]:
-    """Chunk all pages of a parsed document while maintaining accurate page numbers.
+    """Chunk all pages of a parsed document as a continuous cross-page stream.
 
-    Args:
-        pages: List of page/slide/sheet text strings from parser.
-        chunk_size: Maximum characters per chunk.
-        chunk_overlap: Overlap between sub-chunks.
-        source_filename: Original filename for context headers.
-
-    Returns:
-        List of all chunk dicts across pages with sequential chunk_index.
+    Maintains hierarchical heading breadcrumbs and keeps articles/clauses unbroken
+    across page breaks while preserving accurate starting page numbers on every chunk.
     """
-    all_chunks: list[dict] = []
-    current_index = 0
-
+    line_pages: list[tuple[str, int]] = []
     for page_num, page_text in enumerate(pages, start=1):
         if not page_text or not page_text.strip():
             continue
-        page_chunks = chunk_text(
-            text=page_text,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            page_number=page_num,
-            source_filename=source_filename,
-            start_chunk_index=current_index,
-        )
-        all_chunks.extend(page_chunks)
-        current_index += len(page_chunks)
+        cleaned_page = _STRUCTURED_JSON_BLOCK_RE.sub("\n", page_text).strip()
+        if not cleaned_page:
+            continue
+        for ln in cleaned_page.split("\n"):
+            line_pages.append((ln, page_num))
+
+    if not line_pages:
+        return []
+
+    sections = _detect_sections_from_line_stream(line_pages)
+    all_chunks = _build_chunks_from_sections(
+        sections=sections,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        source_filename=source_filename,
+        start_chunk_index=0,
+    )
 
     logger.info(
-        "Document '%s' (%d pages) chunked into %d total chunks",
+        "Document '%s' (%d pages) chunked into %d total chunks (cross-page sections=%d)",
         source_filename,
         len(pages),
         len(all_chunks),
+        len(sections),
     )
     return all_chunks
