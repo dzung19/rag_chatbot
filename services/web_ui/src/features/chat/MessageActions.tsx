@@ -3,19 +3,68 @@ import { Copy, Check, RefreshCw, ThumbsUp, ThumbsDown, FileSpreadsheet, Loader2 
 import { useChatStore } from "../../stores/chatStore";
 import { useToastStore } from "../../stores/toastStore";
 import { exportCompareExcelApi } from "../../api/endpoints";
+import type { Source } from "../../types/api";
 import styles from "./MessageActions.module.css";
 
 interface MessageActionsProps {
   conversationId: string;
   messageId: string;
   content: string;
+  sources?: Source[];
   feedback?: "up" | "down";
+}
+
+function sanitizeFilenamePart(raw: string): string {
+  return raw
+    .replace(/[\\/:*?"<>|\r\n]+/g, "_")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80);
+}
+
+function buildExportDocumentName(sources?: Source[], content?: string): string {
+  if (sources && sources.length > 0) {
+    const uniqueNames: string[] = [];
+    const seen = new Set<string>();
+    for (const src of sources) {
+      const fn = (src.filename || "").trim();
+      if (!fn || fn.toLowerCase() === "unknown") continue;
+      const base = fn.replace(/\.[^/.]+$/, "").trim();
+      const key = base.toLowerCase();
+      if (base && !seen.has(key)) {
+        seen.add(key);
+        uniqueNames.push(base);
+      }
+      if (uniqueNames.length >= 2) break;
+    }
+    if (uniqueNames.length > 0) {
+      const sanitized = sanitizeFilenamePart(uniqueNames.join("_"));
+      if (sanitized) return sanitized;
+    }
+  }
+
+  if (content) {
+    const billMatch = content.match(
+      /\|\s*\d+\s*\|\s*(?:Số\s*Bill|Số\s*B\/L|Bill\s*No\.?)\s*\|\s*([^|\n]+)\|/i
+    );
+    if (billMatch && billMatch[1]) {
+      const candidate = billMatch[1].replace(/\*\*/g, "").trim();
+      if (candidate && candidate !== "-" && candidate !== "N/A") {
+        const sanitized = sanitizeFilenamePart(candidate);
+        if (sanitized) return sanitized;
+      }
+    }
+  }
+
+  return new Date().toISOString().slice(0, 10).replace(/-/g, "");
 }
 
 export const MessageActions: React.FC<MessageActionsProps> = ({
   conversationId,
   messageId,
   content,
+  sources,
   feedback,
 }) => {
   const { regenerate, setFeedback, isStreaming } = useChatStore();
@@ -49,12 +98,13 @@ export const MessageActions: React.FC<MessageActionsProps> = ({
     if (isExporting) return;
     setIsExporting(true);
     try {
-      const blob = await exportCompareExcelApi(content, "Bao_cao_doi_chieu_BL");
+      const docName = buildExportDocumentName(sources, content);
+      const exportName = `Ket_qua_doi_chieu_BL_${docName}`;
+      const blob = await exportCompareExcelApi(content, exportName);
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      const nowStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-      a.download = `Ket_qua_doi_chieu_BL_${nowStr}.xlsx`;
+      a.download = `${exportName}.xlsx`;
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);

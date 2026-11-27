@@ -121,6 +121,7 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
                 conversationId={conversationId}
                 messageId={message.id}
                 content={message.content}
+                sources={message.sources}
                 feedback={message.feedback}
               />
             )}
